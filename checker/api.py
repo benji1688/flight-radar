@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import requests
 
 
@@ -18,6 +20,16 @@ class Relay:
     def save(self, results: dict, stats: dict, run: dict) -> None:
         r = requests.put(f"{self.base}/api/results", headers=self.headers, timeout=30,
                          json={"results": results, "stats": stats, "run": run})
+        r.raise_for_status()
+
+    def legs(self, alert_id: str) -> dict:
+        r = requests.get(f"{self.base}/api/legs/{alert_id}", headers=self.headers, timeout=60)
+        r.raise_for_status()
+        return r.json()
+
+    def save_legs(self, alert_id: str, data: dict) -> None:
+        r = requests.put(f"{self.base}/api/legs/{alert_id}", headers=self.headers, timeout=60,
+                         data=json.dumps(data, separators=(",", ":")))
         r.raise_for_status()
 
     def notify(self, messages: list[dict]) -> None:

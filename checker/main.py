@@ -380,8 +380,15 @@ def main() -> int:
         for i, alert in enumerate(due):
             remaining = max(google.max_requests - google.requests, 0)
             budget = max(2, remaining * weights[i] // max(sum(weights[i:]), 1))
+            res = results[alert["id"]]
             try:
-                msg = process_alert(alert, results[alert["id"]], ctx, budget)
+                detail = relay.legs(alert["id"])
+            except Exception as e:
+                log.warning("mémoire des trajets illisible pour %s : %s", alert["id"], e)
+                detail = {}
+            res["legs"], res["tp"] = detail.get("legs", {}), detail.get("tp", {})
+            try:
+                msg = process_alert(alert, res, ctx, budget)
             except Blocked as e:
                 errors.append(f"Google Flights a bloqué les requêtes ({e}) : on réessaiera au prochain passage.")
                 log.warning("Google bloqué : %s", e)
@@ -390,7 +397,9 @@ def main() -> int:
                 log.exception("alerte %s en erreur", alert["id"])
                 errors.append(f"{alert['id']} : {type(e).__name__} {e}")
                 msg = None
-            cov = results[alert["id"]].get("coverage", {})
+            # La mémoire détaillée est stockée à part, pour garder « results » léger pour le bot.
+            relay.save_legs(alert["id"], {"legs": res.pop("legs", {}), "tp": res.pop("tp", {})})
+            cov = res.get("coverage", {})
             log.info("%s : %s/%s trajets vérifiés sur %s destination(s)", alert["id"],
                      cov.get("legs_known"), cov.get("legs_total"), cov.get("dests"))
             if msg:

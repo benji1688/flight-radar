@@ -126,6 +126,7 @@ class Aviasales(unittest.TestCase):
 
 class FakeTP:
     enabled = True
+    token = "t"
     calls = 0
     errors = []
 
@@ -212,3 +213,42 @@ class GoogleQuery(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MainLoop(unittest.TestCase):
+    def test_main_with_fake_relay(self):
+        import os
+        from unittest import mock
+        saved = {}
+
+        class FakeRelay:
+            def __init__(self, *a):
+                pass
+
+            def state(self):
+                return {"owner": 1, "alerts": [FLEX, NYE], "settings": {"min_gain_eur": 15}, "results": {},
+                        "stats": {}, "run": None}
+
+            def legs(self, alert_id):
+                return {}
+
+            def save_legs(self, alert_id, data):
+                saved[alert_id] = data
+
+            def save(self, results, stats, run):
+                saved["results"], saved["run"] = results, run
+
+            def notify(self, messages):
+                saved["messages"] = messages
+
+        g = FakeGoogle()
+        with mock.patch.object(M, "Relay", FakeRelay), mock.patch.object(M, "GoogleFlights", lambda **k: g), \
+                mock.patch.object(M, "Travelpayouts", lambda tok: FakeTP()), \
+                mock.patch.object(M.FX, "load", classmethod(lambda cls: FXR)), \
+                mock.patch.object(M, "load_airports", lambda: {}), \
+                mock.patch.object(M, "paris_now", lambda: __import__("datetime").datetime(2026, 11, 22, 12)), \
+                mock.patch.dict(os.environ, {"WORKER_URL": "https://x", "API_KEY": "k" * 24}):
+            self.assertEqual(M.main(), 0)
+        self.assertIn("legs", saved["a2"])
+        self.assertNotIn("legs", saved["results"]["a2"])   # la mémoire détaillée est stockée à part
+        self.assertEqual(saved["run"]["alerts_checked"], 2)

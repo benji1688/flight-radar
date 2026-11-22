@@ -181,6 +181,7 @@ async function handleCommand(env, chatId, text) {
       }
       if (cmd === '/suppr') {
         alerts.splice(alerts.indexOf(a), 1);
+        await env.STATE.delete(`legs:${a.id}`);
         msg = `🗑️ ${a.id} supprimée.`;
       }
       await putJSON(env, 'alerts', alerts);
@@ -286,6 +287,20 @@ export default {
           putJSON(env, 'run', body.run || null),
         ]);
         return json({ ok: true });
+      }
+
+      // Mémoire détaillée des trajets d'une alerte : stockée telle quelle, sans être relue par le bot
+      // (le JSON peut peser plusieurs centaines de Ko).
+      const legsMatch = url.pathname.match(/^\/api\/legs\/(a\d+)$/);
+      if (legsMatch) {
+        const key = `legs:${legsMatch[1]}`;
+        if (req.method === 'GET') {
+          return new Response((await env.STATE.get(key)) || '{}', { headers: { 'content-type': 'application/json' } });
+        }
+        if (req.method === 'PUT') {
+          await env.STATE.put(key, await req.text());
+          return json({ ok: true });
+        }
       }
 
       if (url.pathname === '/api/notify' && req.method === 'POST') {
