@@ -52,6 +52,7 @@ jobs:
           API_KEY: ${{ secrets.API_KEY }}
           TRAVELPAYOUTS_TOKEN: ${{ secrets.TRAVELPAYOUTS_TOKEN }}
           GOOGLE_MAX_REQUESTS: ${{ vars.GOOGLE_MAX_REQUESTS || '80' }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' }}
         run: python -m checker.main
 
       # GitHub met en pause les tâches planifiées d'un dépôt public sans commit depuis 60 jours.

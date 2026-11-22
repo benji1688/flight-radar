@@ -191,7 +191,9 @@ def main() -> int:
     prev_run = state.get("run") or {}
 
     now = datetime.now(timezone.utc)
-    due = [a for a in alerts if is_due(a, results.setdefault(a["id"], {}), now)]
+    force = os.environ.get("FORCE") == "true"  # lancement manuel : toutes les alertes actives sont vérifiées
+    due = [a for a in alerts if is_due(a, results.setdefault(a["id"], {}), now)
+           or (force and a.get("active", True))]
     due.sort(key=lambda a: (not a.get("priority"), results[a["id"]].get("last_check") or ""))
     log.info("%d alerte(s), %d à vérifier ce passage", len(alerts), len(due))
 
