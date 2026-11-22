@@ -1,6 +1,5 @@
 """Diagnostic : page HTML de Google Flights (GET) contre appel interne (POST), sur une même série de trajets."""
 import random, time
-from urllib.parse import urlencode
 from fast_flights import FlightQuery, Passengers, create_query
 from fast_flights.fetcher import URL, _build_default_client
 from fast_flights.parser import parse

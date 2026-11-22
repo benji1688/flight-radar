@@ -367,7 +367,7 @@ def main() -> int:
 
     errors: list[str] = []
     messages: list[dict] = []
-    google = GoogleFlights(max_requests=int(os.environ.get("GOOGLE_MAX_REQUESTS", "100")), delay=(1.5, 3.5))
+    google = GoogleFlights(max_requests=int(os.environ.get("GOOGLE_MAX_REQUESTS", "100")), delay=(2.5, 5.0))
     tp = Travelpayouts(os.environ.get("TRAVELPAYOUTS_TOKEN"))
     if not tp.token:
         errors.append("Pas de token Travelpayouts : les alertes « vers partout » se limitent à la liste de destinations par défaut.")
