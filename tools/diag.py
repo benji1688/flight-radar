@@ -1,17 +1,15 @@
-"""Diagnostic : teste le moteur réel sur Lyon–Madrid (Google multi-pays + Aviasales)."""
-import logging, os
+"""Diagnostic : teste le moteur réel sur plusieurs dates Lyon–Madrid."""
+import logging
 from checker.fx import FX
 from checker.markets import MARKETS
 from checker.sources.google import GoogleFlights
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.WARNING)
 fx = FX.load()
-g = GoogleFlights(delay=(1, 2))
-for code in ["fr", "pl", "hu", "tr", "in", "br", "mx", "es", "gb"]:
-    q = g.search("LYS", "MAD", "2026-12-03", "2026-12-06", MARKETS[code], False, None, fx, 2)
-    print(code, q and (q.price, q.currency, round(q.eur, 2), q.airline, q.out_time, q.stops))
-q = g.search("LYS", "MAD", "2026-12-03", "2026-12-06", MARKETS["fr"], False, [17, 23], fx, 2)
-print("fr soir", q and (q.price, q.out_time, q.airline))
-q = g.search("LYS", "MAD", "2026-12-03", None, MARKETS["fr"], True, None, fx, 2)
-print("fr aller simple direct", q and (q.price, q.out_time, q.airline, q.stops))
-print("statut", g.status, g.requests)
+g = GoogleFlights(delay=(2, 4))
+for out, ret in [("2026-12-04", "2026-12-07"), ("2026-12-10", "2026-12-13"), ("2026-12-11", "2026-12-14"), ("2026-12-17", "2026-12-20")]:
+    q = g.search("LYS", "MAD", out, ret, MARKETS["fr"], False, None, fx, 2)
+    print(out, ret, q and (q.price, q.airline, q.out_time, q.stops))
+    q = g.search("LYS", "MAD", out, ret, MARKETS["pl"], False, None, fx, 2)
+    print("  pl", q and (q.price, q.currency, round(q.eur, 1)))
+print("statut", g.status, g.requests, "vides", g.empty)

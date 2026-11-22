@@ -13,6 +13,8 @@ import time
 from urllib.parse import urlencode
 
 from fast_flights import FlightQuery, Passengers, create_query
+from unittest import mock
+
 from fast_flights import shopping as S
 from fast_flights.fetcher import URL, _build_default_client
 from fast_flights.shopping_options import ShoppingOptions
@@ -23,6 +25,8 @@ from ..planner import Quote, in_window
 
 log = logging.getLogger(__name__)
 
+_orig_url = S._shopping_rpc_url
+_orig_headers = S._shopping_rpc_headers
 CHEAPEST = ShoppingOptions(ranking_mode="cheapest", result_sort="price")
 
 
@@ -43,6 +47,7 @@ class GoogleFlights:
         self.delay = delay
         self.requests = 0
         self.status = "ok"
+        self.empty = 0
         self.client = None
 
     @property
@@ -76,31 +81,31 @@ class GoogleFlights:
         self.requests += 1
         if self.client is None:
             self.client = _build_default_client()
-            S._warmup_shopping_session(self.client, language="en-GB",
-                                       cookie_header=S._shopping_rpc_headers(language="en-GB", currency="EUR")["cookie"])
-        url = S._shopping_rpc_url(language=market.hl, currency=market.currency).replace("&gl=US", f"&gl={market.gl}")
-        headers = S._shopping_rpc_headers(language=market.hl, currency=market.currency)
-        headers["x-goog-ext-259736195-jspb"] = headers["x-goog-ext-259736195-jspb"].replace('"IE"', f'"{market.gl}"')
-        body = S._encode_shopping_request(legs, [], 1, shopping=CHEAPEST).encode("utf-8")
+        gl = market.gl
 
-        flights = None
-        for attempt in range(2):  # Google renvoie parfois une réponse vide au premier essai
-            if attempt:
-                time.sleep(2.5)
+        def rpc_url(**kw):
+            return _orig_url(**kw).replace("&gl=US", f"&gl={gl}")
+
+        def rpc_headers(**kw):
+            h = _orig_headers(**kw)
+            h["x-goog-ext-259736195-jspb"] = h["x-goog-ext-259736195-jspb"].replace('"IE"', f'"{gl}"')
+            return h
+
+        # La bibliothèque gère l'échauffement de session et réessaie quand Google renvoie une réponse vide.
+        with mock.patch.object(S, "_shopping_rpc_url", rpc_url), mock.patch.object(S, "_shopping_rpc_headers", rpc_headers):
             try:
-                res = self.client.post(url, headers=headers, content=body)
+                _, _, _, flights = S.fetch_shopping_results(
+                    self.client, legs, [], shopping=CHEAPEST, language=market.hl,
+                    currency=market.currency, max_retries=3)
             except Exception as e:
                 log.warning("Google Flights injoignable : %s", e)
                 return None
-            if res.status_code in (403, 429):
-                self.status = "bloqué"
-                raise Blocked(f"HTTP {res.status_code}")
-            if res.status_code != 200:
-                log.warning("Google Flights HTTP %s pour %s→%s %s", res.status_code, origin, destination, out_date)
-                return None
-            flights = S._extract_full_flights_list(res.text, shopping=CHEAPEST, source="rpc")
-            if flights:
-                break
+        diag = getattr(flights, "diagnostics", None)
+        if diag and diag.status == "blocked":
+            self.status = "bloqué"
+            raise Blocked(f"HTTP {diag.http_status}")
+        if diag and diag.status == "empty":
+            self.empty += 1
         if not flights:
             log.info("Google : aucun vol %s→%s %s (%s)", origin, destination, out_date, market.code)
             return None
