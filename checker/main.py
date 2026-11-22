@@ -24,7 +24,7 @@ from .sources.travelpayouts import Travelpayouts, load_airports
 log = logging.getLogger("flight-radar")
 
 NORMAL_INTERVAL = timedelta(hours=3) - timedelta(minutes=10)
-TP_MARKETS = ["fr", "pl", "de"]          # caches Aviasales interrogés
+TP_MARKETS = ["fr"]                      # le cache Aviasales est identique quel que soit le marché (testé le 22/11/2026)
 EXPLORE_EVERY = timedelta(days=7)         # balayage complet de tous les pays
 MAX_TP_CALLS_PER_ALERT = 40
 HISTORY_DAYS = 180
