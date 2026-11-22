@@ -16,11 +16,11 @@ NYE = {"id": "t2", "origins": ["LYS"], "destinations": [], "date_from": "2026-12
        "months": [], "weekends": False, "nights": None, "one_way": False, "direct": False, "max_price": None,
        "dep_window": None, "ret_window": None, "out_rules": None, "ret_rules": None,
        "out_dates": ["2026-12-30", "2026-12-31"], "ret_dates": ["2027-01-02", "2027-01-03"], "notify": True}
-g = GoogleFlights(max_requests=int(os.environ.get("N", "70")), delay=(1.5, 3.0))
+g = GoogleFlights(max_requests=int(os.environ.get("N", "10")), delay=(2.0, 4.0))
 ctx = M.Ctx({"min_gain_eur": 15, "drop_pct": 5, "fx_fee_pct": 2, "markets_per_search": 2}, {}, FX.load(),
             Travelpayouts(os.environ.get("TRAVELPAYOUTS_TOKEN")), g, load_airports(), paris_now().date())
 from checker.sources.google import Blocked
-for alert, budget in ((FLEX, 45), (NYE, 25)):
+for alert, budget in ((FLEX, 7), (NYE, 3)):
     res = {}
     try:
         msg = M.process_alert(alert, res, ctx, budget)

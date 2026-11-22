@@ -28,10 +28,10 @@ from .sources.travelpayouts import Travelpayouts, load_airports
 
 log = logging.getLogger("flight-radar")
 
-NORMAL_INTERVAL = timedelta(hours=3) - timedelta(minutes=10)
+NORMAL_INTERVAL = timedelta(minutes=40)   # passage toutes les 15 min : alertes normales ≈ 1 passage sur 3
 TP_EVERY = timedelta(hours=6)          # rafraîchissement du repérage Aviasales
 TOP_TTL_PRIO = timedelta(hours=1)      # fraîcheur exigée pour les meilleurs trajets
-TOP_TTL = timedelta(hours=3)
+TOP_TTL = timedelta(hours=2)
 LEG_TTL = timedelta(hours=24)          # au-delà, un trajet est revérifié quand il reste du budget
 EXPLORE_EVERY = timedelta(days=7)      # tour complet de tous les pays pour la meilleure combinaison
 MAX_DESTS = 45
@@ -298,7 +298,7 @@ def process_alert(alert: dict, res: dict, ctx: Ctx, budget: int) -> dict | None:
 
     # Par petits lots : la file est recalculée après chaque lot pour tenir compte des prix trouvés
     # (une destination trop chère est abandonnée, ses retours ne sont pas cherchés).
-    market_budget = max(2, budget // 4)
+    market_budget = budget // 4
     used = 0
     while used < budget - market_budget and ctx.google.available:
         trips = current_trips()
@@ -367,7 +367,7 @@ def main() -> int:
 
     errors: list[str] = []
     messages: list[dict] = []
-    google = GoogleFlights(max_requests=int(os.environ.get("GOOGLE_MAX_REQUESTS", "100")), delay=(2.5, 5.0))
+    google = GoogleFlights(max_requests=int(os.environ.get("GOOGLE_MAX_REQUESTS", "10")), delay=(2.0, 4.0))
     tp = Travelpayouts(os.environ.get("TRAVELPAYOUTS_TOKEN"))
     if not tp.token:
         errors.append("Pas de token Travelpayouts : les alertes « vers partout » se limitent à la liste de destinations par défaut.")
@@ -379,7 +379,7 @@ def main() -> int:
         weights = [2 if a.get("priority") else 1 for a in due]
         for i, alert in enumerate(due):
             remaining = max(google.max_requests - google.requests, 0)
-            budget = max(4, remaining * weights[i] // max(sum(weights[i:]), 1))
+            budget = max(2, remaining * weights[i] // max(sum(weights[i:]), 1))
             try:
                 msg = process_alert(alert, results[alert["id"]], ctx, budget)
             except Blocked as e:
@@ -398,9 +398,9 @@ def main() -> int:
 
     errors.extend(tp.errors)
     blocked_streak = (prev_run.get("blocked_streak", 0) + 1) if google.status == "bloqué" else 0
-    if blocked_streak == 3:
-        messages.append({"text": "⚠️ Google Flights bloque le moteur depuis 3 passages. Les alertes continuent "
-                                 "avec Aviasales ; si ça dure, baisse le nombre de pays testés (/reglages pays 2)."})
+    if blocked_streak == 12:
+        messages.append({"text": "⚠️ Google Flights bloque le moteur depuis 3 heures. Les estimations Aviasales "
+                                 "continuent ; si ça dure plus d'une journée, préviens Claude."})
     if google.requests >= 10 and google.empty >= google.requests * 0.8:
         errors.append("Google Flights renvoie presque toujours des réponses vides : la bibliothèque faster-flights "
                       "est peut-être à mettre à jour.")

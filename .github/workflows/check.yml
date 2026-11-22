@@ -2,7 +2,7 @@ name: Chercher les prix
 
 on:
   schedule:
-    - cron: "17 * * * *"   # toutes les heures (GitHub peut décaler de quelques minutes)
+    - cron: "*/15 * * * *"   # toutes les 15 min (GitHub peut décaler ou sauter un passage)
   workflow_dispatch:        # bouton « Run workflow » pour lancer un passage tout de suite
 
 permissions:
@@ -15,7 +15,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
 
@@ -51,7 +51,7 @@ jobs:
           WORKER_URL: ${{ steps.relay.outputs.url }}
           API_KEY: ${{ secrets.API_KEY }}
           TRAVELPAYOUTS_TOKEN: ${{ secrets.TRAVELPAYOUTS_TOKEN }}
-          GOOGLE_MAX_REQUESTS: ${{ vars.GOOGLE_MAX_REQUESTS || '80' }}
+          GOOGLE_MAX_REQUESTS: ${{ vars.GOOGLE_MAX_REQUESTS || '10' }}
           FORCE: ${{ github.event_name == 'workflow_dispatch' }}
         run: python -m checker.main
 

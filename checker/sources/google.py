@@ -50,7 +50,6 @@ class GoogleFlights:
         self.status = "ok"
         self.empty = 0
         self.empty_streak = 0
-        self.paused = False
         self.client = None
 
     @property
@@ -58,8 +57,7 @@ class GoogleFlights:
         return self.status != "bloqué" and self.requests < self.max_requests
 
     def _rpc(self, legs, market: Market):
-        """Appel interne GetShoppingResults avec le pays forcé. Réessaie sur réponse vide ; sur 429, pause d'une
-        minute puis un essai ; si Google bloque encore, lève Blocked."""
+        """Appel interne GetShoppingResults avec le pays forcé. Réessaie sur réponse vide ; lève Blocked sur 403/429."""
         if self.client is None:
             self.client = _build_default_client()
             S._warmup_shopping_session(self.client, language="en-GB",
@@ -68,7 +66,6 @@ class GoogleFlights:
         headers = _orig_headers(language=market.hl, currency=market.currency)
         headers["x-goog-ext-259736195-jspb"] = headers["x-goog-ext-259736195-jspb"].replace('"IE"', f'"{market.gl}"')
         body = S._encode_shopping_request(legs, [], 1, shopping=CHEAPEST).encode("utf-8")
-        pauses = 0
         for attempt in range(4):
             if attempt:
                 time.sleep(2.0 * (1.5 ** (attempt - 1)))
@@ -78,14 +75,10 @@ class GoogleFlights:
                 log.warning("Google Flights injoignable : %s", e)
                 continue
             if res.status_code in (403, 429):
-                if pauses or self.paused:
-                    self.status = "bloqué"
-                    raise Blocked(f"HTTP {res.status_code}")
-                log.warning("Google limite le débit (HTTP %s) : pause d'une minute", res.status_code)
-                pauses += 1
-                self.paused = True
-                time.sleep(60)
-                continue
+                # Google limite chaque adresse IP à une dizaine d'appels rapprochés : on s'arrête là,
+                # le passage suivant tournera sur une autre machine GitHub (donc une autre IP).
+                self.status = "bloqué"
+                raise Blocked(f"HTTP {res.status_code}")
             if res.status_code != 200:
                 return None
             flights = S._extract_full_flights_list(res.text, shopping=CHEAPEST, source="rpc")
@@ -94,7 +87,7 @@ class GoogleFlights:
                 return flights
         self.empty += 1
         self.empty_streak += 1
-        if self.empty_streak >= 6:
+        if self.empty_streak >= 4:
             self.status = "bloqué"
             raise Blocked("réponses vides en série")
         return None
