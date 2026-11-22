@@ -13,6 +13,6 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r checker/requirements.txt
-      - run: python tools/diag.py
+      - run: python -m tools.diag
         env:
           TRAVELPAYOUTS_TOKEN: ${{ secrets.TRAVELPAYOUTS_TOKEN }}
