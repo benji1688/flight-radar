@@ -20,6 +20,7 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       API_KEY: ${{ secrets.API_KEY }}
+      GH_DISPATCH_TOKEN: ${{ secrets.GH_DISPATCH_TOKEN }}
     defaults:
       run:
         working-directory: worker
@@ -100,6 +101,13 @@ jobs:
         run: |
           printf '%s' "$TELEGRAM_BOT_TOKEN" | npx -y wrangler@4 secret put BOT_TOKEN
           printf '%s' "$API_KEY" | npx -y wrangler@4 secret put API_KEY
+          # Facultatif : permet la commande /go (lancer une recherche depuis Telegram).
+          if [ -n "$GH_DISPATCH_TOKEN" ]; then
+            printf '%s' "$GH_DISPATCH_TOKEN" | npx -y wrangler@4 secret put GH_TOKEN
+            printf '%s' "$GITHUB_REPOSITORY" | npx -y wrangler@4 secret put GH_REPO
+          else
+            echo "GH_DISPATCH_TOKEN absent : la commande /go expliquera comment l'activer."
+          fi
 
       - name: Brancher Telegram sur le relais
         env:
@@ -117,6 +125,7 @@ jobs:
           echo "$res" | grep -q '"ok":true' || { echo "::error::Telegram a refusé : $res"; exit 1; }
           curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setMyCommands" -H 'content-type: application/json' -d '{"commands":[
             {"command":"alerte","description":"Créer une alerte"},
+            {"command":"go","description":"Lancer une recherche maintenant"},
             {"command":"liste","description":"Mes alertes et meilleurs prix"},
             {"command":"voir","description":"Détail d une alerte"},
             {"command":"pays","description":"Classement des pays"},

@@ -73,6 +73,7 @@ Villes connues : lyon, geneve, paris, londres, milan… Sinon code aéroport à 
 /notif a3 off · /notif a3 on — couper / remettre les notifs
 /prio a3 — vérifier à chaque passage (sinon toutes les 3 h)
 /suppr a3 — supprimer
+/go — lancer une recherche tout de suite
 
 <b>Pays et réglages</b>
 /pays — classement des pays les moins chers
@@ -80,6 +81,36 @@ Villes connues : lyon, geneve, paris, londres, milan… Sinon code aéroport à 
 <code>/reglages frais 2 gain 15 baisse 5 silence 23-7 pays 3</code>
 <code>/reglages exclure in,br</code> · <code>/reglages inclure in</code>
 /statut — dernier passage du moteur`;
+
+// Lance tout de suite le workflow « Chercher les prix » sur GitHub (nécessite le secret GH_TOKEN).
+async function triggerSearch(env) {
+  if (!env.GH_TOKEN || !env.GH_REPO) return { ok: false, reason: 'token' };
+  const last = await env.STATE.get('last_go');
+  if (last && Date.now() - Number(last) < 90_000) return { ok: false, reason: 'recent' };
+  const r = await fetch(`https://api.github.com/repos/${env.GH_REPO}/actions/workflows/check.yml/dispatches`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${env.GH_TOKEN}`,
+      accept: 'application/vnd.github+json',
+      'x-github-api-version': '2022-11-28',
+      'user-agent': 'flight-radar-bot',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ ref: 'main' }),
+  });
+  if (r.status !== 204) return { ok: false, reason: `GitHub a répondu ${r.status}` };
+  await env.STATE.put('last_go', String(Date.now()));
+  return { ok: true };
+}
+
+const GO_SETUP = `Pour lancer une recherche depuis Telegram, il faut une clé GitHub (une seule fois, 3 min) :
+1. github.com → photo de profil → <b>Settings</b> → <b>Developer settings</b> → <b>Personal access tokens</b> → <b>Fine-grained tokens</b> → <b>Generate new token</b>
+2. Nom : flight-radar · Expiration : 1 an · <b>Only select repositories</b> → flight-radar
+3. <b>Permissions</b> → <b>Actions</b> : <b>Read and write</b> → <b>Generate token</b>, copie-le
+4. Dans le dépôt : Settings → Secrets and variables → Actions → New repository secret, nom <code>GH_DISPATCH_TOKEN</code>
+5. Actions → <b>Déployer le bot</b> → Run workflow
+
+En attendant, le moteur passe tout seul toutes les 15 minutes.`;
 
 function fmtEur(n) { return `${Math.round(n)} €`; }
 
@@ -111,7 +142,10 @@ async function handleCommand(env, chatId, text) {
       alerts.push(alert);
       await putJSON(env, 'seq', seq);
       await putJSON(env, 'alerts', alerts);
-      return send(env, chatId, `✅ Alerte <b>${alert.id}</b> créée\n${esc(describeAlert(alert))}\n\nPremière recherche au prochain passage du moteur (≤ 1 h).`);
+      const go = await triggerSearch(env);
+      const next = go.ok ? '🚀 Recherche lancée : premiers résultats dans 2 à 3 minutes (/voir ' + alert.id + ').'
+        : 'Première recherche au prochain passage du moteur (≤ 15 min).';
+      return send(env, chatId, `✅ Alerte <b>${alert.id}</b> créée\n${esc(describeAlert(alert))}\n\n${next}`);
     }
 
     case '/liste': {
@@ -188,6 +222,15 @@ async function handleCommand(env, chatId, text) {
       return send(env, chatId, msg);
     }
 
+    case '/go':
+    case '/chercher': {
+      const go = await triggerSearch(env);
+      if (go.ok) return send(env, chatId, '🚀 Recherche lancée sur toutes tes alertes actives. Résultats dans 2 à 3 minutes (/liste, /voir).');
+      if (go.reason === 'token') return send(env, chatId, GO_SETUP);
+      if (go.reason === 'recent') return send(env, chatId, 'Une recherche vient d\'être lancée, attends 2 minutes.');
+      return send(env, chatId, `❌ Impossible de lancer la recherche (${esc(go.reason)}). Vérifie le secret GH_DISPATCH_TOKEN.`);
+    }
+
     case '/pays': {
       const stats = await getJSON(env, 'stats', {});
       const all = stats._all || {};
@@ -223,11 +266,12 @@ Pays exclus : ${(s.excluded_markets || []).join(', ').toUpperCase() || 'aucun'}`
 
     case '/statut': {
       const run = await getJSON(env, 'run', null);
-      if (!run) return send(env, chatId, 'Le moteur n\'a pas encore tourné. Il passe toutes les heures (onglet Actions sur GitHub).');
+      if (!run) return send(env, chatId, 'Le moteur n\'a pas encore tourné. Il passe toutes les 15 minutes (onglet Actions sur GitHub).');
       return send(env, chatId, `<b>Dernier passage</b> : ${esc(run.at.replace('T', ' ').slice(0, 16))} UTC
 Alertes vérifiées : ${run.alerts_checked}
 Requêtes Google Flights : ${run.google_requests} (${esc(run.google_status)})
-Requêtes Aviasales : ${run.tp_calls}${run.errors && run.errors.length ? `\n\n⚠️ ${run.errors.map(esc).join('\n⚠️ ')}` : ''}`);
+Requêtes Aviasales : ${run.tp_calls}
+Prochain passage automatique : dans 15 min au plus (/go pour lancer tout de suite)${run.errors && run.errors.length ? `\n\n⚠️ ${run.errors.map(esc).join('\n⚠️ ')}` : ''}`);
     }
 
     default:
