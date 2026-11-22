@@ -50,6 +50,8 @@ class GoogleFlights:
         self.status = "ok"
         self.empty = 0
         self.empty_streak = 0
+        self.last_empty = False
+        self.empty_ok = False   # devient vrai dès que Google renvoie des vols pendant ce passage
         self.client = None
 
     @property
@@ -84,13 +86,38 @@ class GoogleFlights:
             flights = S._extract_full_flights_list(res.text, shopping=CHEAPEST, source="rpc")
             if flights:
                 self.empty_streak = 0
+                self.empty_ok = True   # Google répond : les réponses vides précédentes étaient réelles
                 return flights
         self.empty += 1
         self.empty_streak += 1
-        if self.empty_streak >= 3:
+        self.last_empty = True
+        if self.empty_streak >= 3 and not self._canary():
             self.status = "bloqué"
             raise Blocked("réponses vides en série")
         return None
+
+    def _canary(self) -> bool:
+        """Plusieurs réponses vides d'affilée : vraie absence de vols ou blocage déguisé ?
+        On teste une liaison toujours desservie (Paris → Londres). Si elle répond, Google fonctionne."""
+        from datetime import date, timedelta
+        day = (date.today() + timedelta(days=10)).isoformat()
+        time.sleep(random.uniform(*self.delay))
+        self.requests += 1
+        legs = [FlightQuery(date=day, from_airport="CDG", to_airport="LHR")]
+        url = _orig_url(language="en-GB", currency="EUR").replace("&gl=US", "&gl=FR")
+        headers = _orig_headers(language="en-GB", currency="EUR")
+        headers["x-goog-ext-259736195-jspb"] = headers["x-goog-ext-259736195-jspb"].replace('"IE"', '"FR"')
+        body = S._encode_shopping_request(legs, [], 1, shopping=CHEAPEST).encode("utf-8")
+        try:
+            res = self.client.post(url, headers=headers, content=body)
+            ok = res.status_code == 200 and bool(S._extract_full_flights_list(res.text, shopping=CHEAPEST, source="rpc"))
+        except Exception:
+            ok = False
+        if ok:
+            log.info("réponses vides mais Google répond sur Paris–Londres : absence réelle de vols")
+            self.empty_streak = 0
+            self.empty_ok = True
+        return ok
 
     def search_leg(self, origin: str, destination: str, day: str, market: Market, direct: bool,
                    window: list | None, fx: FX, fee_pct: float) -> Leg | None:
@@ -108,6 +135,7 @@ class GoogleFlights:
         if self.requests:
             time.sleep(random.uniform(*self.delay))
         self.requests += 1
+        self.last_empty = False
         flights = self._rpc(legs, market)
         if not flights:
             return None

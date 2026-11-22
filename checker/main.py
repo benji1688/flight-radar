@@ -49,6 +49,7 @@ class Ctx:
         self.today = today
         self.fee = float(settings.get("fx_fee_pct", 2))
         self.now = datetime.now(timezone.utc)
+        self.empty_keys: list[str] = []
 
 
 def iso_now() -> str:
@@ -186,8 +187,9 @@ def plan_queue(alert: dict, store: dict, dests: list[str], outs: list[str], rets
                 push(*todo_ret.pop(0))
 
     # 3. Revérifier les trajets anciens (les plus vieux d'abord)
+    # (un trajet « sans vol » est revérifié au bout de 3 jours : de nouveaux vols ont pu ouvrir)
     for _, k in sorted((store[k]["at"], k) for k in store
-                       if store[k].get("fr") and age(store[k].get("at"), ctx.now) >= LEG_TTL):
+                       if age(store[k].get("at"), ctx.now) >= (LEG_TTL if store[k].get("fr") else 3 * LEG_TTL)):
         o, rest = k.split(">")
         dst, day = rest.split("@")
         push("out" if o in alert["origins"] else "ret", o, dst, day)
@@ -207,9 +209,12 @@ def query_leg(o: str, dst: str, day: str, alert: dict, store: dict, ctx: Ctx) ->
         return
     leg = ctx.google.search_leg(o, dst, day, MARKETS["fr"], alert.get("direct", False), window or None,
                                 ctx.fx, ctx.fee)
-    entry = store.setdefault(leg_key(o, dst, day), {})
+    key = leg_key(o, dst, day)
+    entry = store.setdefault(key, {})
     entry.update({"at": iso_now(), "fr": leg.to_dict() if leg else None})
     entry.setdefault("mk", {})
+    if getattr(ctx.google, "last_empty", False):
+        ctx.empty_keys.append(key)   # à oublier si Google s'avère bloqué (réponse vide ≠ aucun vol)
 
 
 def compare_markets(trips: list[Trip], alert: dict, store: dict, res: dict, ctx: Ctx, budget: int) -> int:
@@ -316,6 +321,10 @@ def process_alert(alert: dict, res: dict, ctx: Ctx, budget: int) -> dict | None:
     except Blocked as e:
         # Google refuse cette machine : on garde ce qui a été trouvé, le prochain passage reprendra.
         log.warning("Google bloqué pendant %s : %s", alert["id"], e)
+        if not getattr(ctx.google, "empty_ok", True):
+            for k in ctx.empty_keys:
+                if k in store and not store[k].get("fr"):
+                    del store[k]
     trips = current_trips()
 
     single = len(dests) == 1
