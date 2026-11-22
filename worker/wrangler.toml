@@ -1,0 +1,9 @@
+name = "flight-radar"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+workers_dev = true
+
+# L'identifiant est rempli automatiquement par le workflow « Déployer le bot ».
+[[kv_namespaces]]
+binding = "STATE"
+id = "__KV_ID__"

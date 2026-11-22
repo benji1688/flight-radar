@@ -1,0 +1,113 @@
+name: Déployer le bot
+
+# À lancer une fois après avoir rempli les secrets (onglet Actions → « Déployer le bot » → Run workflow).
+# Se relance tout seul quand le code du relais change.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["worker/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      API_KEY: ${{ secrets.API_KEY }}
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Vérifier les secrets
+        run: |
+          missing=""
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID TELEGRAM_BOT_TOKEN API_KEY; do
+            if [ -z "${!v}" ]; then missing="$missing $v"; fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Secrets manquants :$missing (Settings → Secrets and variables → Actions)"
+            exit 1
+          fi
+          if [ ${#API_KEY} -lt 20 ]; then
+            echo "::error::API_KEY doit faire au moins 20 caractères"
+            exit 1
+          fi
+
+      - name: Tests du parseur
+        run: node --test test/*.test.js
+
+      - name: Base de données KV (création si besoin)
+        run: |
+          npx -y wrangler@4 kv namespace list > /tmp/kv.txt 2>/dev/null || true
+          id=$(python3 - <<'PY'
+          import json, re
+          raw = open('/tmp/kv.txt').read()
+          m = re.search(r'\[\s*(\{|\])', raw)
+          try:
+              items = json.JSONDecoder().raw_decode(raw[m.start():])[0] if m else []
+          except Exception:
+              items = []
+          ids = [n['id'] for n in items if 'flight-radar' in n.get('title', '') and n.get('title', '').endswith('STATE')]
+          print(ids[0] if ids else '')
+          PY
+          )
+          if [ -z "$id" ]; then
+            out=$(npx -y wrangler@4 kv namespace create flight-radar-STATE 2>&1)
+            echo "$out"
+            id=$(echo "$out" | grep -oE '[0-9a-f]{32}' | head -1)
+          fi
+          if [ -z "$id" ]; then
+            echo "::error::Impossible de créer la base KV : vérifie les droits du token Cloudflare (modèle « Edit Cloudflare Workers »)."
+            exit 1
+          fi
+          sed -i "s/__KV_ID__/$id/" wrangler.toml
+          echo "KV prête"
+
+      - name: Déployer le relais
+        id: deploy
+        run: |
+          out=$(npx -y wrangler@4 deploy 2>&1) || { echo "$out"; echo "::error::Échec du déploiement. Si le message parle de sous-domaine workers.dev, ouvre une fois Workers & Pages dans le tableau de bord Cloudflare pour en choisir un, puis relance."; exit 1; }
+          echo "$out"
+          url=$(echo "$out" | grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' | head -1)
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Enregistrer les secrets du relais
+        run: |
+          printf '%s' "$TELEGRAM_BOT_TOKEN" | npx -y wrangler@4 secret put BOT_TOKEN
+          printf '%s' "$API_KEY" | npx -y wrangler@4 secret put API_KEY
+
+      - name: Brancher Telegram sur le relais
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          if [ -z "$URL" ]; then
+            echo "::error::Adresse du relais introuvable dans la sortie du déploiement."
+            exit 1
+          fi
+          secret=$(printf '%s' "$API_KEY" | sha256sum | cut -c1-64)
+          res=$(curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+            --data-urlencode "url=${URL}/telegram" \
+            --data-urlencode "secret_token=${secret}" \
+            --data-urlencode 'allowed_updates=["message"]')
+          echo "$res" | grep -q '"ok":true' || { echo "::error::Telegram a refusé : $res"; exit 1; }
+          curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setMyCommands" -H 'content-type: application/json' -d '{"commands":[
+            {"command":"alerte","description":"Créer une alerte"},
+            {"command":"liste","description":"Mes alertes et meilleurs prix"},
+            {"command":"voir","description":"Détail d une alerte"},
+            {"command":"pays","description":"Classement des pays"},
+            {"command":"reglages","description":"Réglages"},
+            {"command":"statut","description":"Dernier passage du moteur"},
+            {"command":"aide","description":"Mode d emploi"}]}' > /dev/null
+          echo "✅ Bot en ligne : $URL — écris /start à ton bot sur Telegram."
