@@ -50,30 +50,43 @@ jobs:
 
       - name: Base de données KV (création si besoin)
         run: |
-          npx -y wrangler@4 kv namespace list > /tmp/kv.txt 2>/dev/null || true
-          id=$(python3 - <<'PY'
-          import json, re
-          raw = open('/tmp/kv.txt').read()
-          m = re.search(r'\[\s*(\{|\])', raw)
-          try:
-              items = json.JSONDecoder().raw_decode(raw[m.start():])[0] if m else []
-          except Exception:
-              items = []
-          ids = [n['id'] for n in items if 'flight-radar' in n.get('title', '') and n.get('title', '').endswith('STATE')]
-          print(ids[0] if ids else '')
+          python3 - <<'PY'
+          import json, os, sys, urllib.request, urllib.error
+
+          acc = os.environ["CLOUDFLARE_ACCOUNT_ID"].strip()
+          tok = os.environ["CLOUDFLARE_API_TOKEN"].strip()
+          base = f"https://api.cloudflare.com/client/v4/accounts/{acc}/storage/kv/namespaces"
+
+          def call(url, data=None):
+              req = urllib.request.Request(url, data=json.dumps(data).encode() if data else None,
+                                           method="POST" if data else "GET",
+                                           headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"})
+              try:
+                  with urllib.request.urlopen(req) as r:
+                      return json.load(r)
+              except urllib.error.HTTPError as e:
+                  body = e.read().decode(errors="replace")
+                  print(f"::error::Cloudflare a répondu HTTP {e.code} : {body}")
+                  if e.code in (400, 403, 404):
+                      print("::error::Vérifie CLOUDFLARE_ACCOUNT_ID (32 caractères de l'adresse du tableau de bord) "
+                            "et que le token a bien le droit « Workers KV Storage : Edit ».")
+                  sys.exit(1)
+
+          if len(acc) != 32:
+              print(f"::error::CLOUDFLARE_ACCOUNT_ID fait {len(acc)} caractères au lieu de 32 : vérifie la valeur collée.")
+              sys.exit(1)
+
+          items = call(base + "?per_page=100").get("result") or []
+          ns = next((n["id"] for n in items if n.get("title") == "flight-radar-STATE"), None)
+          if ns:
+              print("Base KV existante réutilisée")
+          else:
+              ns = call(base, {"title": "flight-radar-STATE"})["result"]["id"]
+              print("Base KV créée")
+          path = "wrangler.toml"
+          txt = open(path).read().replace("__KV_ID__", ns)
+          open(path, "w").write(txt)
           PY
-          )
-          if [ -z "$id" ]; then
-            out=$(npx -y wrangler@4 kv namespace create flight-radar-STATE 2>&1)
-            echo "$out"
-            id=$(echo "$out" | grep -oE '[0-9a-f]{32}' | head -1)
-          fi
-          if [ -z "$id" ]; then
-            echo "::error::Impossible de créer la base KV : vérifie les droits du token Cloudflare (modèle « Edit Cloudflare Workers »)."
-            exit 1
-          fi
-          sed -i "s/__KV_ID__/$id/" wrangler.toml
-          echo "KV prête"
 
       - name: Déployer le relais
         id: deploy
