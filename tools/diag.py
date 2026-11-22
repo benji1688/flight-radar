@@ -19,9 +19,14 @@ NYE = {"id": "t2", "origins": ["LYS"], "destinations": [], "date_from": "2026-12
 g = GoogleFlights(max_requests=int(os.environ.get("N", "70")), delay=(1.5, 3.0))
 ctx = M.Ctx({"min_gain_eur": 15, "drop_pct": 5, "fx_fee_pct": 2, "markets_per_search": 2}, {}, FX.load(),
             Travelpayouts(os.environ.get("TRAVELPAYOUTS_TOKEN")), g, load_airports(), paris_now().date())
+from checker.sources.google import Blocked
 for alert, budget in ((FLEX, 45), (NYE, 25)):
     res = {}
-    msg = M.process_alert(alert, res, ctx, budget)
+    try:
+        msg = M.process_alert(alert, res, ctx, budget)
+    except Blocked as e:
+        print("BLOQUÉ après", g.requests, "requêtes :", e)
+        msg = None
     print("=====", alert["id"], res.get("coverage"), "TP dests:", list((res.get("tp") or {}).get("score", {}).items())[:12])
     for t in res.get("top", []):
         print(f"  {t['eur']:>7} {t['source']:<9} {t['origin']}>{t['destination']} {t['out_date']} {t['out_time']} {t['out_airline']} {t.get('out_market')}"
