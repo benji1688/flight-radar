@@ -1,16 +1,16 @@
-"""Décide quand prévenir et rédige les messages Telegram."""
+"""Décide quels bons plans annoncer et rédige les messages Telegram."""
 
 from __future__ import annotations
 
 from datetime import date
 from html import escape
-from statistics import median
 
 from .markets import MARKETS
-from .planner import Quote
+from .planner import Leg, Trip
 
 DAYS = ["lun.", "mar.", "mer.", "jeu.", "ven.", "sam.", "dim."]
 MONTHS = ["", "janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."]
+MAX_DEALS_PER_MESSAGE = 6
 
 
 def fmt_day(s: str) -> str:
@@ -18,66 +18,83 @@ def fmt_day(s: str) -> str:
     return f"{DAYS[x.weekday()]} {x.day} {MONTHS[x.month]}"
 
 
-def should_notify(alert: dict, best_eur: float, res: dict, settings: dict) -> tuple[bool, str]:
-    """(prévenir ?, raison). Met à jour le prix de référence quand il remonte nettement."""
+def select_deals(alert: dict, trips: list[Trip], res: dict, settings: dict) -> list[tuple[Trip, str]]:
+    """Bons plans à annoncer : une destination est annoncée quand elle passe sous le prix max,
+    puis à chaque nouvelle baisse d'au moins `drop_pct` %. Seuls les prix vérifiés sur Google comptent."""
     if not alert.get("notify", True):
-        return False, "notifs coupées"
+        return []
+    notified: dict = res.setdefault("notified", {})
     max_price = alert.get("max_price")
-    if max_price is not None and best_eur > max_price:
-        prev = res.get("notified_eur")
-        if prev is not None and best_eur > prev * 1.15:
-            res["notified_eur"] = None  # le prix est reparti à la hausse : la prochaine baisse sous le seuil re-préviendra
-        return False, "au-dessus du prix max"
-    prev = res.get("notified_eur")
-    if prev is None:
-        return True, "premier prix sous ton seuil" if max_price is not None else "premier prix trouvé"
     drop = settings.get("drop_pct", 5) / 100
-    if best_eur <= prev * (1 - drop):
-        return True, f"baisse de {round(prev - best_eur)} €"
-    if best_eur > prev * 1.15:
-        res["notified_eur"] = best_eur  # nouvelle référence plus haute, sans notif
-    return False, "pas de baisse suffisante"
+    deals = []
+    candidates = [t for t in trips if t.source == "google"]
+    if max_price is None:
+        candidates = candidates[:3]
+    for t in candidates:
+        key = f"{t.out.origin}>{t.out.destination}"
+        prev = notified.get(key)
+        if max_price is not None and t.eur > max_price:
+            if prev is not None and t.eur > prev * 1.15:
+                notified.pop(key)  # reparti à la hausse : la prochaine baisse sous le seuil sera annoncée
+            continue
+        if prev is None:
+            reason = "nouveau" if max_price is None else f"sous {max_price:g} €"
+        elif t.eur <= prev * (1 - drop):
+            reason = f"−{round(prev - t.eur)} €"
+        else:
+            if t.eur > prev * 1.15:
+                notified[key] = round(t.eur, 2)
+            continue
+        notified[key] = round(t.eur, 2)
+        deals.append((t, reason))
+    return deals[:MAX_DEALS_PER_MESSAGE]
 
 
-def is_deal(best_eur: float, history: list) -> bool:
-    prices = [p for _, p in history[-30:]]
-    return len(prices) >= 5 and best_eur < 0.8 * median(prices)
+def place(code: str, airports: dict) -> str:
+    a = airports.get(code)
+    name = a.get("name") if a else None
+    return f"{escape(name)} ({code})" if name and name != code else code
 
 
-def build_message(alert: dict, q: Quote, reason: str, fr_eur: float | None, settings: dict,
-                  deal: bool, airports: dict) -> str:
-    def place(code: str) -> str:
-        a = airports.get(code)
-        return f"{code} ({escape(a['name'])})" if a and a.get("name") and a["name"] != code else code
+def leg_line(arrow: str, leg: Leg, settings: dict) -> str:
+    parts = [f"{arrow} {fmt_day(leg.date)}" + (f" {leg.time}" if leg.time else "")]
+    if leg.airline:
+        parts.append(escape(leg.airline))
+    if leg.stops is not None:
+        parts.append("direct" if leg.stops == 0 else f"{leg.stops} escale{'s' if leg.stops > 1 else ''}")
+    parts.append(f"{round(leg.eur)} €")
+    line = " · ".join(parts)
+    if leg.market != "fr":
+        m = MARKETS.get(leg.market)
+        fee = f", frais {settings.get('fx_fee_pct', 2)} % inclus" if leg.currency != "EUR" else ""
+        line += (f"\n   🌍 vendu en {m.name if m else leg.market.upper()} : "
+                 f"{round(leg.price):,} {leg.currency}{fee}".replace(",", " "))
+    if leg.link:
+        label = "Google Flights" if leg.source == "google" else "Aviasales"
+        line += f' · <a href="{escape(leg.link)}">{label}</a>'
+    return line
 
-    head = "🔥 <b>Prix anormalement bas</b>\n" if deal else ""
-    lines = [f"{head}✈️ <b>{place(q.origin)} → {place(q.destination)} · {round(q.eur)} €</b>"]
-    if q.ret_date:
-        nights = (date.fromisoformat(q.ret_date) - date.fromisoformat(q.out_date)).days
-        t_out = f" {q.out_time}" if q.out_time else ""
-        t_ret = f" {q.ret_time}" if q.ret_time else ""
-        lines.append(f"📅 {fmt_day(q.out_date)}{t_out} → {fmt_day(q.ret_date)}{t_ret} ({nights} nuit{'s' if nights > 1 else ''})")
-    else:
-        lines.append(f"📅 {fmt_day(q.out_date)}{' ' + q.out_time if q.out_time else ''} · aller simple")
-    detail = []
-    if q.airline:
-        detail.append(escape(q.airline))
-    if q.stops is not None:
-        detail.append("direct" if q.stops == 0 else f"{q.stops} escale{'s' if q.stops > 1 else ''}")
-    if detail:
-        lines.append("🛫 " + " · ".join(detail))
-    if q.market != "fr" and fr_eur is not None:
-        m = MARKETS.get(q.market)
-        fee = f", frais {settings.get('fx_fee_pct', 2)} % inclus" if q.currency != "EUR" else ""
-        lines.append(f"🌍 Vendu en {m.name if m else q.market.upper()} : {round(q.price):,} {q.currency}".replace(",", " ")
-                     + f" ≈ {round(q.eur)} €{fee}, soit {round(fr_eur - q.eur)} € de moins qu'en France ({round(fr_eur)} €)")
-        lines.append("   Réservation : un VPN ou une adresse de facturation locale peuvent être demandés (à vérifier sur le site).")
-    if q.source == "aviasales":
-        lines.append("ℹ️ Prix Aviasales en cache, à confirmer sur le site")
-    lines.append(f"💡 {escape(reason)}")
-    if q.link:
-        label = "Google Flights" if q.source == "google" else "Aviasales"
-        lines.append(f'🔗 <a href="{escape(q.link)}">Voir sur {label}</a>')
+
+def build_digest(alert: dict, deals: list[tuple[Trip, str]], res: dict, settings: dict, airports: dict) -> str:
+    max_price = alert.get("max_price")
+    head = f"✈️ <b>{len(deals)} bon{'s' if len(deals) > 1 else ''} plan{'s' if len(deals) > 1 else ''}"
+    head += f" sous {max_price:g} €</b>" if max_price is not None else "</b>"
+    lines = [head]
+    foreign = False
+    for i, (t, reason) in enumerate(deals, 1):
+        lines.append("")
+        lines.append(f"<b>{i}. {place(t.out.origin, airports)} → {place(t.out.destination, airports)} · "
+                     f"{round(t.eur)} €</b> ({escape(reason)})")
+        lines.append(leg_line("🛫", t.out, settings))
+        if t.ret:
+            nights = (date.fromisoformat(t.ret.date) - date.fromisoformat(t.out.date)).days
+            lines.append(leg_line("🛬", t.ret, settings) + f" · {nights} nuit{'s' if nights > 1 else ''}")
+        foreign = foreign or t.out.market != "fr" or (t.ret and t.ret.market != "fr")
+    lines.append("")
+    if any(t.ret for t, _ in deals):
+        lines.append("ℹ️ Aller et retour sont deux billets séparés (souvent le moins cher en low-cost).")
+    if foreign:
+        lines.append("ℹ️ Achat depuis un autre pays : un VPN ou une adresse de facturation locale peuvent être demandés (à vérifier sur le site).")
     lines.append(f"#{alert['id']} · /voir {alert['id']} · /notif {alert['id']} off")
     return "\n".join(lines)
 

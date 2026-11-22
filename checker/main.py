@@ -1,9 +1,12 @@
 """Moteur Flight Radar : lancé par GitHub Actions toutes les heures.
 
-1. Lit les alertes sur le relais Cloudflare.
-2. Balaye large avec Aviasales (cache gratuit), dans plusieurs pays.
-3. Confirme les meilleures pistes sur Google Flights, en France puis dans les pays les plus prometteurs.
-4. Apprend quels pays battent la France, enregistre l'historique et envoie les notifs Telegram.
+Principe : l'aller et le retour sont cherchés séparément (deux allers simples), trajet par trajet.
+1. Aviasales (cache gratuit) repère les destinations et les dates prometteuses.
+2. Google Flights vérifie chaque trajet au prix réel, avec le créneau horaire propre à chaque jour.
+   Les prix trouvés sont gardés en mémoire : à chaque passage, le moteur complète les trajets manquants
+   et rafraîchit ceux des meilleures combinaisons.
+3. Pour les meilleurs trajets, il compare les pays de vente (classement appris au fil des passages).
+4. Il combine allers et retours, enregistre l'historique et envoie les bons plans sur Telegram.
 """
 
 from __future__ import annotations
@@ -14,19 +17,24 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 from .api import Relay
+from .destinations import POPULAR
 from .fx import FX
 from .markets import MARKETS, rank_markets, record
-from .notify import build_message, is_deal, is_quiet, should_notify
-from .planner import Quote, months_to_scan, paris_now, quote_ok, route_combos
+from .notify import build_digest, is_quiet, select_deals
+from .planner import (Leg, Trip, best_trips, d, leg_key, months_between, out_dates, out_ok, out_window,
+                      paris_now, ret_dates, ret_ok, ret_window)
 from .sources.google import Blocked, GoogleFlights
 from .sources.travelpayouts import Travelpayouts, load_airports
 
 log = logging.getLogger("flight-radar")
 
 NORMAL_INTERVAL = timedelta(hours=3) - timedelta(minutes=10)
-TP_MARKETS = ["fr"]                      # le cache Aviasales est identique quel que soit le marché (testé le 22/11/2026)
-EXPLORE_EVERY = timedelta(days=7)         # balayage complet de tous les pays
-MAX_TP_CALLS_PER_ALERT = 40
+TP_EVERY = timedelta(hours=6)          # rafraîchissement du repérage Aviasales
+TOP_TTL_PRIO = timedelta(hours=1)      # fraîcheur exigée pour les meilleurs trajets
+TOP_TTL = timedelta(hours=3)
+LEG_TTL = timedelta(hours=24)          # au-delà, un trajet est revérifié quand il reste du budget
+EXPLORE_EVERY = timedelta(days=7)      # tour complet de tous les pays pour la meilleure combinaison
+MAX_DESTS = 45
 HISTORY_DAYS = 180
 
 
@@ -40,6 +48,15 @@ class Ctx:
         self.airports = airports
         self.today = today
         self.fee = float(settings.get("fx_fee_pct", 2))
+        self.now = datetime.now(timezone.utc)
+
+
+def iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def age(ts: str | None, now: datetime) -> timedelta:
+    return now - datetime.fromisoformat(ts) if ts else timedelta.max
 
 
 def is_due(alert: dict, res: dict, now: datetime) -> bool:
@@ -51,129 +68,280 @@ def is_due(alert: dict, res: dict, now: datetime) -> bool:
     return now - datetime.fromisoformat(last) >= NORMAL_INTERVAL
 
 
-def scan_aviasales(alert: dict, ctx: Ctx) -> list[Quote]:
-    quotes: list[Quote] = []
-    calls = 0
-    dests = alert["destinations"] or [None]
-    for month in months_to_scan(alert, ctx.today):
-        for origin in alert["origins"]:
-            for dest in dests:
-                for market in TP_MARKETS:
-                    if calls >= MAX_TP_CALLS_PER_ALERT or not ctx.tp.enabled:
-                        return quotes
-                    calls += 1
-                    found = ctx.tp.search(origin, dest, month, alert.get("one_way", False),
-                                          alert.get("direct", False), market, ctx.fx, ctx.fee)
-                    quotes.extend(q for q in found if quote_ok(alert, q, ctx.today)
-                                  and (not alert["destinations"] or q.destination in alert["destinations"]
-                                       or ctx.airports.get(q.destination, {}).get("city") in alert["destinations"]))
-    return quotes
+# ── Mémoire des trajets ─────────────────────────────────────────────────
+# res["legs"][clé] = {"at": date de vérif FR, "fr": trajet FR ou None (aucun vol), "mk": {pays: trajet ou {"none"}}}
+
+def best_leg(entry: dict, min_gain: float) -> Leg | None:
+    """Prix retenu pour un trajet : la France, sauf si un autre pays fait gagner au moins min_gain/2."""
+    fr = Leg.from_dict(entry["fr"]) if entry.get("fr") else None
+    if fr is None:
+        return None
+    best = fr
+    for m in (entry.get("mk") or {}).values():
+        if m and "eur" in m and m["eur"] <= fr.eur - min_gain / 2 and m["eur"] < best.eur:
+            best = Leg.from_dict(m)
+    return best
 
 
-def cheapest_by_combo(quotes: list[Quote]) -> list[Quote]:
-    best: dict[tuple, Quote] = {}
-    for q in quotes:
-        if q.combo not in best or q.eur < best[q.combo].eur:
-            best[q.combo] = q
-    return sorted(best.values(), key=lambda q: q.eur)
+def known_legs(store: dict, keys: list[str], min_gain: float) -> list[Leg]:
+    out = []
+    for k in keys:
+        e = store.get(k)
+        if e:
+            leg = best_leg(e, min_gain)
+            if leg:
+                out.append(leg)
+    return out
 
 
-def check_google(alert: dict, combos: list[tuple], res: dict, ctx: Ctx, budget: int) -> list[Quote]:
-    """Interroge Google pour chaque combinaison : France d'abord, puis les pays les mieux classés."""
-    quotes: list[Quote] = []
+# ── Repérage Aviasales ──────────────────────────────────────────────────
+
+def tp_discovery(alert: dict, res: dict, ctx: Ctx, outs: list[str], rets: list[str]) -> dict:
+    tp = res.get("tp") or {}
+    if not ctx.tp.enabled or age(tp.get("at"), ctx.now) < TP_EVERY:
+        return tp
+    direct = alert.get("direct", False)
+    out_legs: list[Leg] = []
+    targets = alert["destinations"] or [None]
+    for o in alert["origins"]:
+        for dest in targets:
+            for m in months_between(outs[0], outs[-1]):
+                out_legs += [x for x in ctx.tp.one_way(o, dest, m, direct, ctx.fx, ctx.fee)
+                             if out_ok(alert, x, ctx.today) and x.destination not in alert["origins"]]
+    dest_out: dict[str, float] = {}
+    for x in out_legs:
+        dest_out[x.destination] = min(dest_out.get(x.destination, 1e9), x.eur)
+    ranked = sorted(dest_out, key=dest_out.get)[:15]
+    ret_legs: list[Leg] = []
+    if rets and not alert.get("one_way"):
+        for dest in ranked:
+            for o in alert["origins"]:
+                for m in months_between(rets[0], rets[-1]):
+                    ret_legs += [x for x in ctx.tp.one_way(dest, o, m, direct, ctx.fx, ctx.fee) if ret_ok(alert, x)]
+    dest_ret: dict[str, float] = {}
+    for x in ret_legs:
+        dest_ret[x.origin] = min(dest_ret.get(x.origin, 1e9), x.eur)
+    score = {dst: v + dest_ret.get(dst, v) for dst, v in dest_out.items()}
+    tp = {"at": iso_now(), "score": {k: round(v, 1) for k, v in score.items()},
+          "out": [x.to_dict() for x in sorted(out_legs, key=lambda x: x.eur)[:200]],
+          "ret": [x.to_dict() for x in sorted(ret_legs, key=lambda x: x.eur)[:200]]}
+    res["tp"] = tp
+    return tp
+
+
+# ── Choix des trajets à vérifier sur Google ─────────────────────────────
+
+def plan_queue(alert: dict, store: dict, dests: list[str], outs: list[str], rets: list[str],
+               top: list[Trip], ctx: Ctx) -> list[tuple[str, str, str, str]]:
+    """File ordonnée de trajets (sens, départ, arrivée, date) à demander à Google ce passage."""
+    max_price = alert.get("max_price")
+    min_gain = float(ctx.settings.get("min_gain_eur", 15))
+    top_ttl = TOP_TTL_PRIO if alert.get("priority") else TOP_TTL
+    queue: list[tuple] = []
+    seen: set[str] = set()
+
+    def push(kind, o, dst, day):
+        k = leg_key(o, dst, day)
+        if k not in seen:
+            seen.add(k)
+            queue.append((kind, o, dst, day))
+
+    # 1. Rafraîchir les trajets des meilleures combinaisons
+    for t in top[:3]:
+        for leg, kind in ((t.out, "out"), (t.ret, "ret")):
+            if leg and age(store.get(leg.key, {}).get("at"), ctx.now) >= top_ttl:
+                push(kind, leg.origin, leg.destination, leg.date)
+
+    # 2. Compléter les trajets jamais vérifiés, une destination après l'autre, à tour de rôle
+    def cheapest(keys):
+        return min((x.eur for x in known_legs(store, keys, min_gain)), default=None)
+
+    per_dest = []
+    for dst in dests:
+        okeys = [(o, dst, day) for o in alert["origins"] if o != dst for day in outs]
+        rkeys = [(dst, o, day) for o in alert["origins"] if o != dst for day in rets]
+        min_out = cheapest([leg_key(*k) for k in okeys])
+        min_ret = cheapest([leg_key(*k) for k in rkeys])
+        all_out_checked = all(leg_key(*k) in store for k in okeys)
+        all_ret_checked = bool(rkeys) and all(leg_key(*k) in store for k in rkeys)
+        # Destination sans intérêt : aucun vol, ou un seul trajet déjà au-dessus du budget.
+        if all_out_checked and min_out is None:
+            continue
+        if max_price is not None and all_out_checked and min_out is not None and min_out >= max_price:
+            continue
+        if max_price is not None and all_ret_checked and min_ret is not None and min_ret >= max_price:
+            continue
+        todo_out = [("out", *k) for k in okeys if leg_key(*k) not in store]
+        # Avec un prix max, les retours ne sont cherchés qu'une fois un aller abordable trouvé.
+        worth_ret = not alert.get("one_way") and (max_price is None or (min_out is not None and min_out < max_price))
+        todo_ret = [("ret", *k) for k in rkeys if leg_key(*k) not in store] if worth_ret else []
+        per_dest.append((todo_out, todo_ret))
+    for _ in range(200):
+        if not any(o or r for o, r in per_dest):
+            break
+        for todo_out, todo_ret in per_dest:
+            if todo_out:
+                push(*todo_out.pop(0))
+            if todo_ret:
+                push(*todo_ret.pop(0))
+
+    # 3. Revérifier les trajets anciens (les plus vieux d'abord)
+    for _, k in sorted((store[k]["at"], k) for k in store
+                       if store[k].get("fr") and age(store[k].get("at"), ctx.now) >= LEG_TTL):
+        o, rest = k.split(">")
+        dst, day = rest.split("@")
+        push("out" if o in alert["origins"] else "ret", o, dst, day)
+    return queue
+
+
+def leg_window(alert: dict, leg_origin: str, day: str, ctx: Ctx):
+    if leg_origin in alert["origins"]:
+        return out_window(alert, d(day), ctx.today)
+    return ret_window(alert, None, d(day))
+
+
+def query_leg(o: str, dst: str, day: str, alert: dict, store: dict, ctx: Ctx) -> None:
+    window = leg_window(alert, o, day, ctx)
+    if window is False:
+        store[leg_key(o, dst, day)] = {"at": iso_now(), "fr": None, "mk": {}}
+        return
+    leg = ctx.google.search_leg(o, dst, day, MARKETS["fr"], alert.get("direct", False), window or None,
+                                ctx.fx, ctx.fee)
+    entry = store.setdefault(leg_key(o, dst, day), {})
+    entry.update({"at": iso_now(), "fr": leg.to_dict() if leg else None})
+    entry.setdefault("mk", {})
+
+
+def compare_markets(trips: list[Trip], alert: dict, store: dict, res: dict, ctx: Ctx, budget: int) -> int:
+    """Teste les autres pays de vente sur les trajets des meilleures combinaisons. Renvoie le nombre de requêtes."""
     used = 0
     excluded = ctx.settings.get("excluded_markets") or []
     per_search = int(ctx.settings.get("markets_per_search", 3))
-    explored_at = res.get("explored_at")
-    explore = not explored_at or datetime.now(timezone.utc) - datetime.fromisoformat(explored_at) >= EXPLORE_EVERY
-
-    for idx, (origin, dest, out_s, ret_s) in enumerate(combos):
-        route = f"{origin}-{dest}"
-        country = ctx.airports.get(dest, {}).get("country")
-        ranked = rank_markets(ctx.stats, route, country, excluded)
-        markets = ranked if (explore and idx == 0) else ranked[:per_search]
-        fr_quote = None
-        for code in ["fr", *markets]:
-            if used >= budget or not ctx.google.available:
-                return quotes
-            used += 1
-            q = ctx.google.search(origin, dest, out_s, ret_s, MARKETS[code], alert.get("direct", False),
-                                  alert.get("dep_window"), ctx.fx, ctx.fee)
-            if code == "fr":
-                fr_quote = q
-                if q is None:
-                    break  # pas de vol (ou pas de réponse) : inutile d'essayer les autres pays
-            if q is None:
+    explore = age(res.get("explored_at"), ctx.now) >= EXPLORE_EVERY
+    top_ttl = TOP_TTL_PRIO if alert.get("priority") else TOP_TTL
+    for idx, t in enumerate(trips[:2]):
+        for leg in (t.out, t.ret):
+            if leg is None:
                 continue
-            quotes.append(q)
-            if code != "fr" and fr_quote is not None:
-                gain = fr_quote.eur - q.eur
+            entry = store.get(leg.key) or {}
+            fr = entry.get("fr")
+            if not fr:
+                continue
+            route = f"{leg.origin}-{leg.destination}"
+            ranked = rank_markets(ctx.stats, route, ctx.airports.get(leg.destination, {}).get("country"), excluded)
+            markets = ranked if (explore and idx == 0) else ranked[:per_search]
+            mk = entry.setdefault("mk", {})
+            window = leg_window(alert, leg.origin, leg.date, ctx)
+            for code in markets:
+                prev = mk.get(code)
+                if prev and age(prev.get("at"), ctx.now) < top_ttl:
+                    continue
+                if used >= budget or not ctx.google.available:
+                    return used
+                used += 1
+                q = ctx.google.search_leg(leg.origin, leg.destination, leg.date, MARKETS[code],
+                                          alert.get("direct", False), window or None, ctx.fx, ctx.fee)
+                if q is None:
+                    mk[code] = {"none": True, "at": iso_now()}
+                    continue
+                mk[code] = {**q.to_dict(), "at": iso_now()}
+                gain = fr["eur"] - q.eur
                 record(ctx.stats, route, code, gain >= 1, max(gain, 0))
-        if explore and idx == 0 and fr_quote is not None:
-            res["explored_at"] = datetime.now(timezone.utc).isoformat()
-    return quotes
+        if explore and idx == 0:
+            res["explored_at"] = iso_now()
+    return used
 
 
-def eligible_quotes(quotes: list[Quote], min_gain: float) -> list[Quote]:
-    """Un pays étranger n'est retenu que s'il fait gagner au moins `min_gain` € par rapport à la France."""
-    google = [q for q in quotes if q.source == "google"]
-    if not google:
-        return cheapest_by_combo(quotes)
-    fr = {q.combo: q.eur for q in google if q.market == "fr"}
-    keep = [q for q in google if q.market == "fr" or (q.combo in fr and fr[q.combo] - q.eur >= min_gain)]
-    return cheapest_by_combo(keep)
+def tp_trips(alert: dict, tp: dict, google_dests: set[str]) -> list[Trip]:
+    outs = [Leg.from_dict(x) for x in tp.get("out", []) if x["destination"] not in google_dests]
+    rets = [Leg.from_dict(x) for x in tp.get("ret", []) if x["origin"] not in google_dests]
+    return best_trips(alert, outs, rets)
+
+
+def best_per_destination(trips: list[Trip]) -> list[Trip]:
+    seen, out = set(), []
+    for t in trips:
+        if t.out.destination not in seen:
+            seen.add(t.out.destination)
+            out.append(t)
+    return out
 
 
 def process_alert(alert: dict, res: dict, ctx: Ctx, budget: int) -> dict | None:
     """Traite une alerte, met à jour `res` et renvoie éventuellement un message à envoyer."""
-    tp_quotes = scan_aviasales(alert, ctx) if ctx.tp.enabled else []
-    tp_best = cheapest_by_combo(tp_quotes)
-    k = 4 if alert.get("priority") else 3
-
-    combos: list[tuple] = [q.combo for q in tp_best if len(q.destination) == 3][:k]
-    if alert["destinations"]:
-        # Rotation sur toutes les dates possibles, pour couvrir ce que le cache Aviasales ne connaît pas.
-        all_combos = route_combos(alert, ctx.today)
-        if all_combos:
-            n = k if not combos else 2
-            cursor = res.get("cursor", 0) % len(all_combos)
-            target = len(combos) + n
-            for c in (all_combos[cursor:] + all_combos[:cursor]):
-                if len(combos) >= target:
-                    break
-                if c not in combos:
-                    combos.append(c)
-            res["cursor"] = (cursor + n) % len(all_combos)
-
-    google_quotes = check_google(alert, combos, res, ctx, budget) if combos else []
-    pool = eligible_quotes(tp_quotes + google_quotes, float(ctx.settings.get("min_gain_eur", 15)))
-    res["last_check"] = datetime.now(timezone.utc).isoformat()
-    if not pool:
+    min_gain = float(ctx.settings.get("min_gain_eur", 15))
+    outs = out_dates(alert, ctx.today)
+    rets = [] if alert.get("one_way") else ret_dates(alert, outs)
+    res["last_check"] = iso_now()
+    if not outs:
         return None
 
-    best = pool[0]
-    res["top"] = [q.to_dict() for q in pool[:5]]
-    res["best"] = best.to_dict()
+    # Mémoire : on oublie les trajets passés ou qui ne correspondent plus à l'alerte.
+    store = res.setdefault("legs", {})
+    allowed = set(outs) | set(rets)
+    for k in list(store):
+        if k.split("@")[1] not in allowed:
+            del store[k]
+
+    tp = tp_discovery(alert, res, ctx, outs, rets)
+    if alert["destinations"]:
+        dests = [x for x in alert["destinations"] if x not in alert["origins"]]
+    else:
+        score = tp.get("score", {})
+        pool = set(score) | {x for x in POPULAR if x not in alert["origins"]}
+        dests = sorted(pool, key=lambda x: (score.get(x, 1e6), x))[:MAX_DESTS]
+
+    def current_trips() -> list[Trip]:
+        out_keys = [leg_key(o, dst, day) for dst in dests for o in alert["origins"] for day in outs]
+        ret_keys = [leg_key(dst, o, day) for dst in dests for o in alert["origins"] for day in rets]
+        return best_trips(alert, known_legs(store, out_keys, min_gain), known_legs(store, ret_keys, min_gain))
+
+    # Par petits lots : la file est recalculée après chaque lot pour tenir compte des prix trouvés
+    # (une destination trop chère est abandonnée, ses retours ne sont pas cherchés).
+    market_budget = max(2, budget // 4)
+    used = 0
+    while used < budget - market_budget and ctx.google.available:
+        trips = current_trips()
+        queue = plan_queue(alert, store, dests, outs, rets, best_per_destination(trips), ctx)
+        if not queue:
+            break
+        for _, o, dst, day in queue[:8]:
+            if used >= budget - market_budget or not ctx.google.available:
+                break
+            query_leg(o, dst, day, alert, store, ctx)
+            used += 1
+    trips = current_trips()
+    compare_markets(best_per_destination(trips), alert, store, res, ctx, budget - used)
+    trips = current_trips()
+
+    single = len(dests) == 1
+    shown = trips if single else best_per_destination(trips)
+    google_dests = {t.out.destination for t in trips}
+    estimates = best_per_destination(tp_trips(alert, tp, google_dests)) if tp else []
+    res["top"] = [t.to_dict() for t in shown[:8]] + [t.to_dict() for t in estimates[:4]]
+    res["coverage"] = {"legs_known": len(store),
+                       "legs_total": len(dests) * len(alert["origins"]) * (len(outs) + len(rets)),
+                       "dests": len(dests)}
+    if not shown:
+        res.pop("best", None)
+        return None
+    res["best"] = shown[0].to_dict()
 
     today_s = ctx.today.isoformat()
     hist = [h for h in res.get("history", []) if h[0] != today_s]
     prev_today = next((h[1] for h in res.get("history", []) if h[0] == today_s), None)
-    day_min = round(min(best.eur, prev_today) if prev_today is not None else best.eur, 2)
-    hist.append([today_s, day_min])
+    hist.append([today_s, round(min(shown[0].eur, prev_today) if prev_today is not None else shown[0].eur, 2)])
     res["history"] = hist[-HISTORY_DAYS:]
 
-    notify, reason = should_notify(alert, best.eur, res, ctx.settings)
-    if not notify:
+    deals = select_deals(alert, shown if not single else trips[:1], res, ctx.settings)
+    if not deals:
         return None
-    res["notified_eur"] = round(best.eur, 2)
-    fr_eur = next((q.eur for q in google_quotes if q.market == "fr" and q.combo == best.combo), None)
-    text = build_message(alert, best, reason, fr_eur, ctx.settings,
-                         is_deal(best.eur, res["history"][:-1]), ctx.airports)
-    return {"text": text}
+    return {"text": build_digest(alert, deals, res, ctx.settings, ctx.airports)}
 
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    logging.getLogger("primp").setLevel(logging.WARNING)
     worker_url = os.environ.get("WORKER_URL")
     api_key = os.environ.get("API_KEY")
     if not worker_url or not api_key:
@@ -199,18 +367,19 @@ def main() -> int:
 
     errors: list[str] = []
     messages: list[dict] = []
-    google = GoogleFlights(max_requests=int(os.environ.get("GOOGLE_MAX_REQUESTS", "80")))
+    google = GoogleFlights(max_requests=int(os.environ.get("GOOGLE_MAX_REQUESTS", "100")), delay=(1.5, 3.5))
     tp = Travelpayouts(os.environ.get("TRAVELPAYOUTS_TOKEN"))
     if not tp.token:
-        errors.append("Pas de token Travelpayouts : seules les alertes avec destination précise sont cherchées (Google).")
+        errors.append("Pas de token Travelpayouts : les alertes « vers partout » se limitent à la liste de destinations par défaut.")
 
     if due:
         fx = FX.load()
         airports = load_airports()
         ctx = Ctx(settings, stats, fx, tp, google, airports, paris_now().date())
+        weights = [2 if a.get("priority") else 1 for a in due]
         for i, alert in enumerate(due):
             remaining = max(google.max_requests - google.requests, 0)
-            budget = max(4, remaining // (len(due) - i))
+            budget = max(4, remaining * weights[i] // max(sum(weights[i:]), 1))
             try:
                 msg = process_alert(alert, results[alert["id"]], ctx, budget)
             except Blocked as e:
@@ -221,18 +390,20 @@ def main() -> int:
                 log.exception("alerte %s en erreur", alert["id"])
                 errors.append(f"{alert['id']} : {type(e).__name__} {e}")
                 msg = None
+            cov = results[alert["id"]].get("coverage", {})
+            log.info("%s : %s/%s trajets vérifiés sur %s destination(s)", alert["id"],
+                     cov.get("legs_known"), cov.get("legs_total"), cov.get("dests"))
             if msg:
                 messages.append(msg)
-                log.info("notif prête pour %s", alert["id"])
 
     errors.extend(tp.errors)
     blocked_streak = (prev_run.get("blocked_streak", 0) + 1) if google.status == "bloqué" else 0
     if blocked_streak == 3:
         messages.append({"text": "⚠️ Google Flights bloque le moteur depuis 3 passages. Les alertes continuent "
                                  "avec Aviasales ; si ça dure, baisse le nombre de pays testés (/reglages pays 2)."})
-    if google.status == "format changé ?" and prev_run.get("google_status") != "format changé ?":
-        messages.append({"text": "⚠️ Google Flights a changé son format : il faudra mettre à jour la bibliothèque "
-                                 "faster-flights (fichier checker/requirements.txt)."})
+    if google.requests >= 10 and google.empty >= google.requests * 0.8:
+        errors.append("Google Flights renvoie presque toujours des réponses vides : la bibliothèque faster-flights "
+                      "est peut-être à mettre à jour.")
 
     quiet = is_quiet(settings, paris_now().hour)
     for m in messages:
@@ -249,8 +420,8 @@ def main() -> int:
     }
     relay.save(results, stats, run)
     relay.notify(messages)
-    log.info("terminé : %d requête(s) Google (%s), %d Aviasales, %d notif(s)",
-             google.requests, google.status, tp.calls, len(messages))
+    log.info("terminé : %d requête(s) Google (%s, %d vides), %d Aviasales, %d notif(s)",
+             google.requests, google.status, google.empty, tp.calls, len(messages))
     return 0
 
 

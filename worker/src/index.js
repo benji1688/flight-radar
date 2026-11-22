@@ -58,8 +58,12 @@ const HELP = `<b>✈️ Flight Radar</b>
 <code>/alerte de LYS,GVA vers BCN,LIS du 01/03 au 31/03 nuits 2-4 max 80</code>
 <code>/alerte de lyon vers partout weekends mars,avril max 60</code>
 <code>/alerte de LYS vers OPO en mai aller-simple depart 6-12 direct prio</code>
+<code>/alerte de lyon vers partout en decembre,janvier depart jeu apres 18, ven apres 12 retour sam, dim, lun avant 6 max 100</code>
+<code>/alerte de lyon vers partout aller 30/12 ou 31/12 retour 02/01 ou 03/01</code>
 
-Mots compris : <i>de, vers (ou partout), du … au …, en mars, weekends mars,avril, nuits 2-4, max 80, direct, aller-simple, depart 6-12, retour 17-23, prio</i>
+Mots compris : <i>de, vers (ou partout), du … au …, en mars, weekends mars,avril, nuits 2-4, max 80, direct, aller-simple, prio</i>
+Horaires : <i>depart 6-12</i>, ou par jour : <i>depart jeu apres 18, ven 12-20</i> · <i>retour dim, lun avant 6</i>
+Dates précises : <i>aller 30/12 ou 31/12 retour 02/01</i>
 Villes connues : lyon, geneve, paris, londres, milan… Sinon code aéroport à 3 lettres.
 
 <b>Gérer</b>
@@ -78,6 +82,13 @@ Villes connues : lyon, geneve, paris, londres, milan… Sinon code aéroport à 
 /statut — dernier passage du moteur`;
 
 function fmtEur(n) { return `${Math.round(n)} €`; }
+
+const JOURS = ['dim.', 'lun.', 'mar.', 'mer.', 'jeu.', 'ven.', 'sam.'];
+const MOIS = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'];
+function fmtDay(isoDate) {
+  const dt = new Date(`${isoDate}T12:00:00Z`);
+  return `${JOURS[dt.getUTCDay()]} ${dt.getUTCDate()} ${MOIS[dt.getUTCMonth()]}`;
+}
 
 async function handleCommand(env, chatId, text) {
   const [rawCmd, ...rest] = text.trim().split(/\s+/);
@@ -109,7 +120,7 @@ async function handleCommand(env, chatId, text) {
       const lines = alerts.map((a) => {
         const r = results[a.id];
         const status = !a.active ? '⏸️ ' : (!a.notify ? '🔕 ' : '');
-        const best = r && r.best ? ` — <b>${fmtEur(r.best.eur)}</b> (${esc(r.best.origin)}→${esc(r.best.destination)} ${esc(r.best.out_date)})` : ' — pas encore de prix';
+        const best = r && r.best ? ` — <b>${fmtEur(r.best.eur)}</b> (${esc(r.best.origin)}→${esc(r.best.destination)}, ${fmtDay(r.best.out_date)}${r.best.ret_date ? ` → ${fmtDay(r.best.ret_date)}` : ''})` : ' — pas encore de prix';
         return `${status}<b>${a.id}</b> ${esc(describeAlert(a))}${best}`;
       });
       return send(env, chatId, lines.join('\n\n'));
@@ -122,12 +133,26 @@ async function handleCommand(env, chatId, text) {
       let msg = `<b>${a.id}</b> ${esc(describeAlert(a))}\n`;
       if (!r) return send(env, chatId, `${msg}\nPas encore de recherche.`);
       msg += `Dernière recherche : ${esc((r.last_check || '').replace('T', ' ').slice(0, 16))} UTC\n`;
+      if (r.coverage) {
+        const c = r.coverage;
+        msg += `Trajets vérifiés : ${c.legs_known}/${c.legs_total} sur ${c.dests} destination(s)\n`;
+      }
       if (r.top && r.top.length) {
-        msg += '\n<b>Top actuel</b>\n';
+        msg += '\n<b>Meilleurs prix</b>\n';
         r.top.forEach((q, i) => {
-          const ret = q.ret_date ? ` → ${q.ret_date}` : '';
-          const mk = q.market && q.market !== 'fr' ? ` · vente ${q.market.toUpperCase()}` : '';
-          msg += `${i + 1}. <b>${fmtEur(q.eur)}</b> ${esc(q.origin)}→${esc(q.destination)} ${esc(q.out_date)}${esc(ret)}${esc(mk)}${q.link ? ` · <a href="${esc(q.link)}">lien</a>` : ''}\n`;
+          const est = q.source === 'aviasales' ? ' <i>(estimation Aviasales)</i>' : '';
+          msg += `\n${i + 1}. <b>${fmtEur(q.eur)}</b> ${esc(q.origin)} → ${esc(q.destination)}${est}\n`;
+          msg += `   🛫 ${fmtDay(q.out_date)}${q.out_time ? ` ${esc(q.out_time)}` : ''}${q.out_airline ? ` · ${esc(q.out_airline)}` : ''}`;
+          if (q.out_eur !== undefined && q.ret_date) msg += ` · ${fmtEur(q.out_eur)}`;
+          if (q.out_market && q.out_market !== 'fr') msg += ` · vente ${esc(q.out_market.toUpperCase())}`;
+          if (q.out_link || q.link) msg += ` · <a href="${esc(q.out_link || q.link)}">lien</a>`;
+          if (q.ret_date) {
+            msg += `\n   🛬 ${fmtDay(q.ret_date)}${q.ret_time ? ` ${esc(q.ret_time)}` : ''}${q.ret_airline ? ` · ${esc(q.ret_airline)}` : ''}`;
+            if (q.ret_eur !== undefined && q.ret_eur !== null) msg += ` · ${fmtEur(q.ret_eur)}`;
+            if (q.ret_market && q.ret_market !== 'fr') msg += ` · vente ${esc(q.ret_market.toUpperCase())}`;
+            if (q.ret_link) msg += ` · <a href="${esc(q.ret_link)}">lien</a>`;
+          }
+          msg += '\n';
         });
       }
       if (r.history && r.history.length) {

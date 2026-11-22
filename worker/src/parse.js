@@ -39,12 +39,19 @@ export const CITIES = {
   'new-york': ['JFK', 'EWR'], montreal: ['YUL'], tokyo: ['HND', 'NRT'], bangkok: ['BKK'],
 };
 
+// Jours au format Python (lundi = 0), utilisés par le moteur.
+const DAYS = {
+  lun: 0, lundi: 0, mar: 1, mardi: 1, mer: 2, mercredi: 2, jeu: 3, jeudi: 3,
+  ven: 4, vendredi: 4, sam: 5, samedi: 5, dim: 6, dimanche: 6,
+};
+export const DAY_LABELS = ['lun.', 'mar.', 'mer.', 'jeu.', 'ven.', 'sam.', 'dim.'];
+
 const ANYWHERE = new Set(['partout', '*', 'nimporte', "n'importe", 'importe', 'tout']);
 
 const KEYWORDS = new Set([
   'de', 'depuis', 'vers', 'pour', 'a', 'du', 'au', 'jusqu', "jusqu'au", 'en',
   'weekend', 'weekends', 'we', 'week-end', 'week-ends', 'max', 'budget', 'nuit', 'nuits',
-  'sejour', 'jours', 'direct', 'aller-simple', 'simple', 'as', 'depart', 'retour', 'prio',
+  'sejour', 'jours', 'direct', 'aller-simple', 'simple', 'as', 'depart', 'retour', 'prio', 'aller',
 ]);
 
 export function normalize(s) {
@@ -112,6 +119,45 @@ function parseRange(tok) {
   return [Math.min(a, b), Math.max(a, b)];
 }
 
+// Créneau horaire : "18-24", "18h-23h", "apres 18", "avant 6", "6h".
+function parseWindowAt(tokens, i) {
+  const t = tokens[i] || '';
+  const hour = /^\d{1,2}h?$/.test(tokens[i + 1] || '') ? parseInt(tokens[i + 1], 10) : null;
+  if (hour !== null && hour <= 24 && (t === 'apres' || t === 'des')) return { win: [hour, 24], used: 2 };
+  if (hour !== null && hour <= 24 && t === 'avant') return { win: [0, hour], used: 2 };
+  const r = t.replace(/h/g, '').match(/^(\d{1,2})-(\d{1,2})$/);
+  if (r) {
+    const a = Number(r[1]); const b = Number(r[2]);
+    if (a <= 24 && b <= 24) return { win: [Math.min(a, b), Math.max(a, b)], used: 1 };
+  }
+  const one = t.match(/^(\d{1,2})h$/);
+  if (one) { const a = Number(one[1]); return { win: [a, Math.min(a + 1, 24)], used: 1 }; }
+  return null;
+}
+
+// Après "depart"/"aller"/"retour" : jours (avec créneau), dates précises, ou créneau seul.
+function parseLegSpec(tokens, i, today) {
+  const spec = { rules: null, dates: [], window: null };
+  let j = i;
+  while (j < tokens.length) {
+    const t = tokens[j];
+    if ([',', 'et', 'ou', 'le', 'les', 'puis'].includes(t)) { j++; continue; }
+    if (DAYS[t] !== undefined) {
+      spec.rules = spec.rules || {};
+      const w = parseWindowAt(tokens, j + 1);
+      spec.rules[DAYS[t]] = w ? w.win : null;
+      j += 1 + (w ? w.used : 0);
+      continue;
+    }
+    const dt = /^\d{1,2}[/.]\d{1,2}([/.]\d{2,4})?$/.test(t) ? parseDateAt(tokens, j, today) : null;
+    if (dt) { spec.dates.push(dt.date); j += dt.used; continue; }
+    const w = parseWindowAt(tokens, j);
+    if (w) { spec.window = w.win; j += w.used; continue; }
+    break;
+  }
+  return { spec, next: j, used: j - i };
+}
+
 function parsePlaces(list) {
   const out = []; const errors = [];
   for (const raw of list) {
@@ -146,6 +192,7 @@ export function parseAlert(text, today) {
     origins: [], destinations: [], date_from: null, date_to: null, months: [],
     weekends: false, nights: null, one_way: false, direct: false, max_price: null,
     dep_window: null, ret_window: null, priority: false,
+    out_rules: null, ret_rules: null, out_dates: null, ret_dates: null,
   };
   const errors = [];
   let destSet = false;
@@ -215,11 +262,14 @@ export function parseAlert(text, today) {
     }
     if (tok === 'direct') { a.direct = true; i++; continue; }
     if (tok === 'aller-simple' || tok === 'as' || tok === 'simple') { a.one_way = true; i++; continue; }
-    if (tok === 'depart' || tok === 'retour') {
-      const r = parseRange(tokens[i + 1] || '');
-      if (r && r[1] <= 24) { a[tok === 'depart' ? 'dep_window' : 'ret_window'] = [r[0], r[1] === r[0] ? r[0] + 1 : r[1]]; i += 2; continue; }
-      errors.push(`Créneau illisible après « ${tok} » (ex. ${tok} 6-12)`);
-      i += 1; continue;
+    if (tok === 'depart' || tok === 'retour' || tok === 'aller') {
+      const { spec, next, used } = parseLegSpec(tokens, i + 1, today);
+      if (!used) { errors.push(`Rien de compris après « ${tok} » (ex. ${tok} jeu apres 18, ven apres 12 · ${tok} 30/12,31/12 · ${tok} 6-12)`); i += 1; continue; }
+      const side = tok === 'retour' ? 'ret' : 'out';
+      if (spec.rules) a[`${side}_rules`] = { ...(a[`${side}_rules`] || {}), ...spec.rules };
+      if (spec.dates.length) a[`${side}_dates`] = [...(a[`${side}_dates`] || []), ...spec.dates].sort();
+      if (spec.window) a[side === 'ret' ? 'ret_window' : 'dep_window'] = spec.window;
+      i = next; continue;
     }
     if (tok === 'prio') { a.priority = true; i++; continue; }
     if (tok === ',') { i++; continue; }
@@ -235,6 +285,10 @@ export function parseAlert(text, today) {
   if (!destSet) errors.push('Il manque la destination (ex. « vers BCN » ou « vers partout »)');
 
   // Période
+  if (a.out_dates && a.out_dates.length && !a.date_from && !a.months.length) {
+    a.date_from = a.out_dates[0];
+    a.date_to = a.out_dates[a.out_dates.length - 1];
+  }
   if (a.months.length) {
     const [fy, fm] = a.months[0].split('-').map(Number);
     const [ly, lm] = a.months[a.months.length - 1].split('-').map(Number);
@@ -253,8 +307,10 @@ export function parseAlert(text, today) {
   if (a.date_to < a.date_from) errors.push('La date de fin est avant la date de début');
   if (daysBetween(a.date_from, a.date_to) > 330) errors.push('Période trop longue (11 mois maximum)');
 
+  const flexible = a.out_rules || a.ret_rules || a.out_dates || a.ret_dates;
   if (a.one_way) a.nights = null;
-  else if (!a.nights) a.nights = a.weekends ? [1, 3] : [2, 7];
+  else if (!a.nights && !flexible) a.nights = a.weekends ? [1, 3] : [2, 7];
+  if (a.ret_dates && a.out_dates && a.ret_dates[0] <= a.out_dates[0]) errors.push('Le retour doit être après l\'aller');
 
   if (errors.length) return { errors };
   return { alert: a };
@@ -281,15 +337,23 @@ export function describeAlert(a) {
   if (a.months && a.months.length) {
     const labels = a.months.map((s) => { const [y, m] = s.split('-').map(Number); return `${MONTH_LABELS[m]} ${y}`; });
     parts.push(`${a.weekends ? 'week-ends ' : ''}${labels.join(', ')}`);
-  } else {
+  } else if (!a.out_dates) {
     parts.push(`${a.weekends ? 'week-ends du ' : 'du '}${fmtDate(a.date_from)} au ${fmtDate(a.date_to)}`);
   }
   if (a.one_way) parts.push('aller simple');
   else if (a.nights) parts.push(a.nights[0] === a.nights[1] ? `${a.nights[0]} nuit(s)` : `${a.nights[0]}-${a.nights[1]} nuits`);
+  const fmtWin = (w) => (!w ? '' : (w[1] >= 24 ? ` après ${w[0]}h` : (w[0] === 0 ? ` avant ${w[1]}h` : ` ${w[0]}h-${w[1]}h`)));
+  const fmtRules = (r) => Object.keys(r).map(Number).sort((x, y) => ((x + 6) % 7) - ((y + 6) % 7))
+    .map((k) => `${DAY_LABELS[k]}${fmtWin(r[k])}`).join(', ');
+  const fmtDates = (ds) => ds.map((x) => { const [, m, dd] = x.split('-').map(Number); return `${dd}/${String(m).padStart(2, '0')}`; }).join(' ou ');
+  if (a.out_rules) parts.push(`aller ${fmtRules(a.out_rules)}`);
+  if (a.out_dates) parts.push(`aller le ${fmtDates(a.out_dates)}`);
+  if (a.ret_rules) parts.push(`retour ${fmtRules(a.ret_rules)}`);
+  if (a.ret_dates) parts.push(`retour le ${fmtDates(a.ret_dates)}`);
   if (a.max_price) parts.push(`max ${a.max_price} €`);
   if (a.direct) parts.push('direct');
-  if (a.dep_window) parts.push(`départ ${a.dep_window[0]}h-${a.dep_window[1]}h`);
-  if (a.ret_window) parts.push(`retour ${a.ret_window[0]}h-${a.ret_window[1]}h`);
+  if (a.dep_window) parts.push(`départ${fmtWin(a.dep_window)}`);
+  if (a.ret_window) parts.push(`retour${fmtWin(a.ret_window)}`);
   if (a.priority) parts.push('⚡ prio');
   return parts.join(' · ');
 }

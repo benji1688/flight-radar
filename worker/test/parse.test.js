@@ -69,3 +69,26 @@ test('mois en cours : on part d\'aujourd\'hui', () => {
   assert.equal(r.alert.date_from, T);
   assert.equal(r.alert.date_to, '2026-11-30');
 });
+
+test('jours avec créneaux + partout', () => {
+  const r = parseAlert('/alerte de lyon vers partout en decembre,janvier depart jeu apres 18, ven apres 12 retour sam, dim, lun avant 6 max 100', T);
+  assert.ok(!r.errors, JSON.stringify(r.errors));
+  assert.deepEqual(r.alert.out_rules, { 3: [18, 24], 4: [12, 24] });
+  assert.deepEqual(r.alert.ret_rules, { 5: null, 6: null, 0: [0, 6] });
+  assert.equal(r.alert.nights, null);
+  assert.match(describeAlert(r.alert), /aller jeu\. après 18h, ven\. après 12h · retour sam\., dim\., lun\. avant 6h/);
+});
+
+test('dates précises aller / retour', () => {
+  const r = parseAlert('/alerte de lyon vers partout aller 30/12 ou 31/12 retour 02/01 ou 03/01', T);
+  assert.ok(!r.errors, JSON.stringify(r.errors));
+  assert.deepEqual(r.alert.out_dates, ['2026-12-30', '2026-12-31']);
+  assert.deepEqual(r.alert.ret_dates, ['2027-01-02', '2027-01-03']);
+  assert.equal(r.alert.date_to, '2026-12-31');
+});
+
+test('créneau simple toujours compris', () => {
+  const r = parseAlert('/alerte de LYS vers OPO en mai aller-simple depart 6-12 direct', T);
+  assert.deepEqual(r.alert.dep_window, [6, 12]);
+  assert.equal(r.alert.out_dates, null);
+});
