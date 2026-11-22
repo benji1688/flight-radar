@@ -300,18 +300,22 @@ def process_alert(alert: dict, res: dict, ctx: Ctx, budget: int) -> dict | None:
     # (une destination trop chère est abandonnée, ses retours ne sont pas cherchés).
     market_budget = budget // 4
     used = 0
-    while used < budget - market_budget and ctx.google.available:
-        trips = current_trips()
-        queue = plan_queue(alert, store, dests, outs, rets, best_per_destination(trips), ctx)
-        if not queue:
-            break
-        for _, o, dst, day in queue[:8]:
-            if used >= budget - market_budget or not ctx.google.available:
+    try:
+        while used < budget - market_budget and ctx.google.available:
+            trips = current_trips()
+            queue = plan_queue(alert, store, dests, outs, rets, best_per_destination(trips), ctx)
+            if not queue:
                 break
-            query_leg(o, dst, day, alert, store, ctx)
-            used += 1
-    trips = current_trips()
-    compare_markets(best_per_destination(trips), alert, store, res, ctx, budget - used)
+            for _, o, dst, day in queue[:8]:
+                if used >= budget - market_budget or not ctx.google.available:
+                    break
+                query_leg(o, dst, day, alert, store, ctx)
+                used += 1
+        trips = current_trips()
+        compare_markets(best_per_destination(trips), alert, store, res, ctx, budget - used)
+    except Blocked as e:
+        # Google refuse cette machine : on garde ce qui a été trouvé, le prochain passage reprendra.
+        log.warning("Google bloqué pendant %s : %s", alert["id"], e)
     trips = current_trips()
 
     single = len(dests) == 1
@@ -389,10 +393,6 @@ def main() -> int:
             res["legs"], res["tp"] = detail.get("legs", {}), detail.get("tp", {})
             try:
                 msg = process_alert(alert, res, ctx, budget)
-            except Blocked as e:
-                errors.append(f"Google Flights a bloqué les requêtes ({e}) : on réessaiera au prochain passage.")
-                log.warning("Google bloqué : %s", e)
-                msg = None
             except Exception as e:  # une alerte en erreur ne doit pas casser les autres
                 log.exception("alerte %s en erreur", alert["id"])
                 errors.append(f"{alert['id']} : {type(e).__name__} {e}")
@@ -406,6 +406,8 @@ def main() -> int:
                 messages.append(msg)
 
     errors.extend(tp.errors)
+    if google.status == "bloqué":
+        errors.append("Google Flights a refusé cette machine GitHub : reprise au prochain passage (autre machine).")
     blocked_streak = (prev_run.get("blocked_streak", 0) + 1) if google.status == "bloqué" else 0
     if blocked_streak == 12:
         messages.append({"text": "⚠️ Google Flights bloque le moteur depuis 3 heures. Les estimations Aviasales "

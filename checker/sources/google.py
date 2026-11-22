@@ -66,7 +66,7 @@ class GoogleFlights:
         headers = _orig_headers(language=market.hl, currency=market.currency)
         headers["x-goog-ext-259736195-jspb"] = headers["x-goog-ext-259736195-jspb"].replace('"IE"', f'"{market.gl}"')
         body = S._encode_shopping_request(legs, [], 1, shopping=CHEAPEST).encode("utf-8")
-        for attempt in range(4):
+        for attempt in range(3):
             if attempt:
                 time.sleep(2.0 * (1.5 ** (attempt - 1)))
             try:
@@ -87,7 +87,7 @@ class GoogleFlights:
                 return flights
         self.empty += 1
         self.empty_streak += 1
-        if self.empty_streak >= 4:
+        if self.empty_streak >= 3:
             self.status = "bloqué"
             raise Blocked("réponses vides en série")
         return None
