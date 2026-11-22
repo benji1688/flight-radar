@@ -20,14 +20,15 @@ def fmt_day(s: str) -> str:
 
 def select_deals(alert: dict, trips: list[Trip], res: dict, settings: dict) -> list[tuple[Trip, str]]:
     """Bons plans à annoncer : une destination est annoncée quand elle passe sous le prix max,
-    puis à chaque nouvelle baisse d'au moins `drop_pct` %. Seuls les prix vérifiés sur Google comptent."""
+    puis à chaque nouvelle baisse d'au moins `drop_pct` %. Les estimations Aviasales comptent aussi
+    (signalées « à vérifier ») : Google refuse trop souvent les machines GitHub pour s'en passer."""
     if not alert.get("notify", True):
         return []
     notified: dict = res.setdefault("notified", {})
     max_price = alert.get("max_price")
     drop = settings.get("drop_pct", 5) / 100
     deals = []
-    candidates = [t for t in trips if t.source == "google"]
+    candidates = sorted(trips, key=lambda t: t.eur)
     if max_price is None:
         candidates = candidates[:3]
     for t in candidates:
@@ -83,8 +84,9 @@ def build_digest(alert: dict, deals: list[tuple[Trip, str]], res: dict, settings
     foreign = False
     for i, (t, reason) in enumerate(deals, 1):
         lines.append("")
+        est = " · <i>estimation Aviasales, à vérifier</i>" if t.source != "google" else ""
         lines.append(f"<b>{i}. {place(t.out.origin, airports)} → {place(t.out.destination, airports)} · "
-                     f"{round(t.eur)} €</b> ({escape(reason)})")
+                     f"{round(t.eur)} €</b> ({escape(reason)}){est}")
         lines.append(leg_line("🛫", t.out, settings))
         if t.ret:
             nights = (date.fromisoformat(t.ret.date) - date.fromisoformat(t.out.date)).days
@@ -93,6 +95,8 @@ def build_digest(alert: dict, deals: list[tuple[Trip, str]], res: dict, settings
     lines.append("")
     if any(t.ret for t, _ in deals):
         lines.append("ℹ️ Aller et retour sont deux billets séparés (souvent le moins cher en low-cost).")
+    if any(t.source != "google" for t, _ in deals):
+        lines.append("ℹ️ Estimation Aviasales = prix vu récemment par d'autres voyageurs : ouvre le lien pour vérifier qu'il est toujours dispo.")
     if foreign:
         lines.append("ℹ️ Achat depuis un autre pays : un VPN ou une adresse de facturation locale peuvent être demandés (à vérifier sur le site).")
     lines.append(f"#{alert['id']} · /voir {alert['id']} · /notif {alert['id']} off")

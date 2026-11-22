@@ -99,9 +99,11 @@ class Notify(unittest.TestCase):
         select_deals(FLEX, [self.trip("BCN", 130)], res, self.S)                          # remonte
         self.assertEqual(len(select_deals(FLEX, [self.trip("BCN", 95)], res, self.S)), 1)  # re-annoncé
 
-    def test_aviasales_not_announced(self):
+    def test_aviasales_announced_as_estimate(self):
         t = Trip(leg("LYS", "BCN", "2026-12-03", 20, source="aviasales"), leg("BCN", "LYS", "2026-12-06", 20))
-        self.assertEqual(select_deals(FLEX, [t], {}, self.S), [])
+        deals = select_deals(FLEX, [t], {}, self.S)
+        self.assertEqual(len(deals), 1)
+        self.assertIn("estimation Aviasales", build_digest(FLEX, deals, {}, self.S, {}))
 
     def test_digest(self):
         t = Trip(Leg("LYS", "BCN", "2026-12-03", 120, "PLN", 28.8, "pl", "google", "Vueling", 0, "19:30", "https://x"),

@@ -335,18 +335,21 @@ def process_alert(alert: dict, res: dict, ctx: Ctx, budget: int) -> dict | None:
     res["coverage"] = {"legs_known": len(store),
                        "legs_total": len(dests) * len(alert["origins"]) * (len(outs) + len(rets)),
                        "dests": len(dests)}
-    if not shown:
+    if shown:
+        res["best"] = shown[0].to_dict()
+        today_s = ctx.today.isoformat()
+        hist = [h for h in res.get("history", []) if h[0] != today_s]
+        prev_today = next((h[1] for h in res.get("history", []) if h[0] == today_s), None)
+        hist.append([today_s, round(min(shown[0].eur, prev_today) if prev_today is not None else shown[0].eur, 2)])
+        res["history"] = hist[-HISTORY_DAYS:]
+    elif estimates:
+        res["best"] = estimates[0].to_dict()
+    else:
         res.pop("best", None)
         return None
-    res["best"] = shown[0].to_dict()
 
-    today_s = ctx.today.isoformat()
-    hist = [h for h in res.get("history", []) if h[0] != today_s]
-    prev_today = next((h[1] for h in res.get("history", []) if h[0] == today_s), None)
-    hist.append([today_s, round(min(shown[0].eur, prev_today) if prev_today is not None else shown[0].eur, 2)])
-    res["history"] = hist[-HISTORY_DAYS:]
-
-    deals = select_deals(alert, shown if not single else trips[:1], res, ctx.settings)
+    pool = (shown if not single else trips[:1]) + estimates
+    deals = select_deals(alert, best_per_destination(sorted(pool, key=lambda t: t.eur)), res, ctx.settings)
     if not deals:
         return None
     return {"text": build_digest(alert, deals, res, ctx.settings, ctx.airports)}
