@@ -295,6 +295,12 @@ async function handleUpdate(update, env) {
 }
 
 export default {
+  // Horloge Cloudflare (plus ponctuelle que celle de GitHub) : relance le moteur toutes les 15 min
+  // si la clé GitHub est configurée.
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(triggerSearch(env).catch((e) => console.log('cron', e && e.stack)));
+  },
+
   async fetch(req, env) {
     const url = new URL(req.url);
 

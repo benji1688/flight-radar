@@ -2,7 +2,8 @@ name: Chercher les prix
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # toutes les 15 min (GitHub peut décaler ou sauter un passage)
+    - cron: "3,18,33,48 * * * *"   # toutes les 15 min ; GitHub peut décaler ou sauter des passages,
+                                    # d'où la relance par l'horloge Cloudflare quand la clé GitHub est configurée
   workflow_dispatch:        # bouton « Run workflow » pour lancer un passage tout de suite
 
 permissions:

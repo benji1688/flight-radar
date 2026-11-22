@@ -7,3 +7,7 @@ workers_dev = true
 [[kv_namespaces]]
 binding = "STATE"
 id = "__KV_ID__"
+
+# Relance du moteur toutes les 15 min (utilisée seulement si GH_DISPATCH_TOKEN est configuré).
+[triggers]
+crons = ["7,22,37,52 * * * *"]
