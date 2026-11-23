@@ -393,7 +393,13 @@ def main() -> int:
         fx = FX.load()
         airports = load_airports()
         ctx = Ctx(settings, stats, fx, tp, google, airports, paris_now().date())
-        weights = [2 if a.get("priority") else 1 for a in due]
+        # Une alerte déjà entièrement vérifiée n'a besoin que de rafraîchir ses meilleurs prix :
+        # le gros du budget va aux alertes qui ont encore des trajets à découvrir.
+        def weight(a):
+            cov = results[a["id"]].get("coverage") or {}
+            remaining = (cov.get("legs_total") or 1) - (cov.get("legs_known") or 0)
+            return (2 if a.get("priority") else 1) * (4 if remaining > 0 else 1)
+        weights = [weight(a) for a in due]
         for i, alert in enumerate(due):
             remaining = max(google.max_requests - google.requests, 0)
             budget = max(2, remaining * weights[i] // max(sum(weights[i:]), 1))
