@@ -11,6 +11,7 @@ Principe : l'aller et le retour sont cherchés séparément (deux allers simples
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
@@ -403,6 +404,7 @@ def main() -> int:
                 log.warning("mémoire des trajets illisible pour %s : %s", alert["id"], e)
                 detail = {}
             res["legs"], res["tp"] = detail.get("legs", {}), detail.get("tp", {})
+            before = json.dumps(detail, sort_keys=True)
             try:
                 msg = process_alert(alert, res, ctx, budget)
             except Exception as e:  # une alerte en erreur ne doit pas casser les autres
@@ -410,7 +412,9 @@ def main() -> int:
                 errors.append(f"{alert['id']} : {type(e).__name__} {e}")
                 msg = None
             # La mémoire détaillée est stockée à part, pour garder « results » léger pour le bot.
-            relay.save_legs(alert["id"], {"legs": res.pop("legs", {}), "tp": res.pop("tp", {})})
+            after = {"legs": res.pop("legs", {}), "tp": res.pop("tp", {})}
+            if json.dumps(after, sort_keys=True) != before:   # écriture seulement si quelque chose a changé
+                relay.save_legs(alert["id"], after)
             cov = res.get("coverage", {})
             log.info("%s : %s/%s trajets vérifiés sur %s destination(s)", alert["id"],
                      cov.get("legs_known"), cov.get("legs_total"), cov.get("dests"))

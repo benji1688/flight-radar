@@ -20,6 +20,16 @@ async function getJSON(env, key, fallback) {
 }
 const putJSON = (env, key, v) => env.STATE.put(key, JSON.stringify(v));
 
+// Résultats, statistiques et dernier passage du moteur : une seule clé, donc une seule écriture
+// par passage (le forfait gratuit Cloudflare KV limite les écritures à 1 000 par jour).
+async function getEngine(env) {
+  const e = await getJSON(env, 'engine', null);
+  if (e) return e;
+  const [results, stats, run] = await Promise.all([
+    getJSON(env, 'results', {}), getJSON(env, 'stats', {}), getJSON(env, 'run', null)]);
+  return { results, stats, run };
+}
+
 export const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 async function tg(env, method, payload) {
@@ -83,9 +93,9 @@ Villes connues : lyon, geneve, paris, londres, milan… Sinon code aéroport à 
 /statut — dernier passage du moteur`;
 
 // Lance tout de suite le workflow « Chercher les prix » sur GitHub (nécessite le secret GH_TOKEN).
-async function triggerSearch(env) {
+async function triggerSearch(env, fromClock = false) {
   if (!env.GH_TOKEN || !env.GH_REPO) return { ok: false, reason: 'token' };
-  const last = await env.STATE.get('last_go');
+  const last = fromClock ? null : await env.STATE.get('last_go');
   if (last && Date.now() - Number(last) < 90_000) return { ok: false, reason: 'recent' };
   const r = await fetch(`https://api.github.com/repos/${env.GH_REPO}/actions/workflows/check.yml/dispatches`, {
     method: 'POST',
@@ -99,7 +109,7 @@ async function triggerSearch(env) {
     body: JSON.stringify({ ref: 'main' }),
   });
   if (r.status !== 204) return { ok: false, reason: `GitHub a répondu ${r.status}` };
-  await env.STATE.put('last_go', String(Date.now()));
+  if (!fromClock) await env.STATE.put('last_go', String(Date.now()), { expirationTtl: 120 });
   return { ok: true };
 }
 
@@ -150,7 +160,7 @@ async function handleCommand(env, chatId, text) {
 
     case '/liste': {
       if (!alerts.length) return send(env, chatId, 'Aucune alerte. Crée-en une avec /alerte (exemples : /aide).');
-      const results = await getJSON(env, 'results', {});
+      const { results } = await getEngine(env);
       const lines = alerts.map((a) => {
         const r = results[a.id];
         const status = !a.active ? '⏸️ ' : (!a.notify ? '🔕 ' : '');
@@ -163,7 +173,7 @@ async function handleCommand(env, chatId, text) {
     case '/voir': {
       const a = findAlert();
       if (!a) return send(env, chatId, 'Alerte introuvable. Exemple : /voir a1');
-      const r = (await getJSON(env, 'results', {}))[a.id];
+      const r = (await getEngine(env)).results[a.id];
       let msg = `<b>${a.id}</b> ${esc(describeAlert(a))}\n`;
       if (!r) return send(env, chatId, `${msg}\nPas encore de recherche.`);
       msg += `Dernière recherche : ${esc((r.last_check || '').replace('T', ' ').slice(0, 16))} UTC\n`;
@@ -232,7 +242,7 @@ async function handleCommand(env, chatId, text) {
     }
 
     case '/pays': {
-      const stats = await getJSON(env, 'stats', {});
+      const { stats } = await getEngine(env);
       const all = stats._all || {};
       const rows = Object.entries(all)
         .filter(([m]) => m !== 'fr')
@@ -265,7 +275,7 @@ Pays exclus : ${(s.excluded_markets || []).join(', ').toUpperCase() || 'aucun'}`
     }
 
     case '/statut': {
-      const run = await getJSON(env, 'run', null);
+      const { run } = await getEngine(env);
       if (!run) return send(env, chatId, 'Le moteur n\'a pas encore tourné. Il passe toutes les 15 minutes (onglet Actions sur GitHub).');
       return send(env, chatId, `<b>Dernier passage</b> : ${esc(run.at.replace('T', ' ').slice(0, 16))} UTC
 Alertes vérifiées : ${run.alerts_checked}
@@ -298,7 +308,7 @@ export default {
   // Horloge Cloudflare (plus ponctuelle que celle de GitHub) : relance le moteur toutes les 15 min
   // si la clé GitHub est configurée.
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(triggerSearch(env).catch((e) => console.log('cron', e && e.stack)));
+    ctx.waitUntil(triggerSearch(env, true).catch((e) => console.log('cron', e && e.stack)));
   },
 
   async fetch(req, env) {
@@ -319,10 +329,10 @@ export default {
       if (req.headers.get('authorization') !== `Bearer ${env.API_KEY}`) return json({ error: 'unauthorized' }, 401);
 
       if (url.pathname === '/api/state' && req.method === 'GET') {
-        const [owner, alerts, settings, results, stats, run] = await Promise.all([
-          getJSON(env, 'owner', null), getJSON(env, 'alerts', []), getJSON(env, 'settings', {}),
-          getJSON(env, 'results', {}), getJSON(env, 'stats', {}), getJSON(env, 'run', null),
+        const [owner, alerts, settings, engine] = await Promise.all([
+          getJSON(env, 'owner', null), getJSON(env, 'alerts', []), getJSON(env, 'settings', {}), getEngine(env),
         ]);
+        const { results, stats, run } = engine;
         return json({ owner, alerts, settings: { ...DEFAULT_SETTINGS, ...settings }, results, stats, run });
       }
 
@@ -331,11 +341,7 @@ export default {
         // On ne garde que les résultats des alertes qui existent encore.
         const ids = new Set((await getJSON(env, 'alerts', [])).map((a) => a.id));
         const results = Object.fromEntries(Object.entries(body.results || {}).filter(([id]) => ids.has(id)));
-        await Promise.all([
-          putJSON(env, 'results', results),
-          putJSON(env, 'stats', body.stats || {}),
-          putJSON(env, 'run', body.run || null),
-        ]);
+        await putJSON(env, 'engine', { results, stats: body.stats || {}, run: body.run || null });
         return json({ ok: true });
       }
 
