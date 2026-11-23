@@ -92,3 +92,12 @@ test('créneau simple toujours compris', () => {
   assert.deepEqual(r.alert.dep_window, [6, 12]);
   assert.equal(r.alert.out_dates, null);
 });
+
+test('escale max', () => {
+  const r = parseAlert('/alerte de lyon vers partout en janvier escale max 2h max 100', T);
+  assert.ok(!r.errors, JSON.stringify(r.errors));
+  assert.equal(r.alert.max_layover, 2);
+  assert.equal(r.alert.max_price, 100);
+  assert.match(describeAlert(r.alert), /escale ≤ 2h/);
+  assert.equal(parseAlert('/alerte de LYS vers BCN escale 1h30', T).alert.max_layover, 1.5);
+});

@@ -148,11 +148,16 @@ def out_dates(alert: dict, today: date) -> list[str]:
     return days
 
 
+def layover_unknown(alert: dict, leg: Leg) -> bool:
+    """Aviasales ne donne pas la durée des escales : avec une limite d'escale, on ne garde que ses vols directs."""
+    return bool(alert.get("max_layover")) and leg.source == "aviasales" and leg.stops not in (None, 0)
+
+
 def out_ok(alert: dict, leg: Leg, today: date) -> bool:
     w = out_window(alert, d(leg.date), today)
     if w is False:
         return False
-    if alert.get("direct") and leg.stops not in (None, 0):
+    if (alert.get("direct") and leg.stops not in (None, 0)) or layover_unknown(alert, leg):
         return False
     return in_window(leg.time, w or None)
 
@@ -195,7 +200,7 @@ def ret_ok(alert: dict, leg: Leg) -> bool:
     w = ret_window(alert, None, d(leg.date))
     if w is False:
         return False
-    if alert.get("direct") and leg.stops not in (None, 0):
+    if (alert.get("direct") and leg.stops not in (None, 0)) or layover_unknown(alert, leg):
         return False
     return in_window(leg.time, w or None)
 

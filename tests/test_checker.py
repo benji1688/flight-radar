@@ -157,7 +157,7 @@ class FakeGoogle:
     def available(self):
         return self.requests < self.max_requests
 
-    def search_leg(self, o, dst, day, market, direct, window, fx, fee):
+    def search_leg(self, o, dst, day, market, direct, window, fx, fee, max_layover=None):
         self.requests += 1
         self.calls.append((o, dst, day, market.code))
         wd = date.fromisoformat(day).weekday()
@@ -202,6 +202,27 @@ class EndToEnd(unittest.TestCase):
         res = {"legs": {"LYS>BCN@2026-11-01": {"at": "2026-10-01T00:00:00+00:00", "fr": None}}}
         M.process_alert(FLEX, res, self.ctx(FakeGoogle()), budget=4)
         self.assertNotIn("LYS>BCN@2026-11-01", res["legs"])
+
+
+class Layover(unittest.TestCase):
+    def test_longest_layover(self):
+        from types import SimpleNamespace as N
+        from checker.sources.google import longest_layover
+        dt = lambda d, t: N(date=d, time=t)
+        seg = lambda dep, arr: N(departure=dep, arrival=arr)
+        two = [seg(dt((2026, 12, 3), (19, 0)), dt((2026, 12, 3), (20, 30))),
+               seg(dt((2026, 12, 3), (22,)), dt((2026, 12, 3), (23, 50)))]
+        self.assertEqual(longest_layover(two), 90)
+        night = [seg(dt((2026, 12, 3), (21, 0)), dt((2026, 12, 3), (22, 0))),
+                 seg(dt((2026, 12, 4), (6, 30)), dt((2026, 12, 4), (8, 0)))]
+        self.assertEqual(longest_layover(night), 510)
+
+    def test_domestic_excluded(self):
+        g = FakeGoogle()
+        ctx = M.Ctx({"min_gain_eur": 15}, {}, FXR, FakeTP(), g,
+                    {"LYS": {"country": "fr"}, "NCE": {"country": "fr"}, "BCN": {"country": "es"}}, TODAY)
+        M.process_alert(FLEX, {}, ctx, budget=30)
+        self.assertFalse(any(c[1] == "NCE" for c in g.calls))
 
 
 class GoogleQuery(unittest.TestCase):

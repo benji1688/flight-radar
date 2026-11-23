@@ -52,7 +52,16 @@ const KEYWORDS = new Set([
   'de', 'depuis', 'vers', 'pour', 'a', 'du', 'au', 'jusqu', "jusqu'au", 'en',
   'weekend', 'weekends', 'we', 'week-end', 'week-ends', 'max', 'budget', 'nuit', 'nuits',
   'sejour', 'jours', 'direct', 'aller-simple', 'simple', 'as', 'depart', 'retour', 'prio', 'aller',
+  'escale', 'escales',
 ]);
+
+// Durée d'escale : "2h", "2", "1h30", "90min" → heures.
+export function parseHours(tok) {
+  const m = (tok || '').match(/^(\d{1,2})(?:h(\d{2})?)?$|^(\d{2,3})min$/);
+  if (!m) return null;
+  if (m[3]) return Number(m[3]) / 60;
+  return Number(m[1]) + (m[2] ? Number(m[2]) / 60 : 0);
+}
 
 export function normalize(s) {
   return s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[’`]/g, "'").trim();
@@ -192,7 +201,7 @@ export function parseAlert(text, today) {
     origins: [], destinations: [], date_from: null, date_to: null, months: [],
     weekends: false, nights: null, one_way: false, direct: false, max_price: null,
     dep_window: null, ret_window: null, priority: false,
-    out_rules: null, ret_rules: null, out_dates: null, ret_dates: null,
+    out_rules: null, ret_rules: null, out_dates: null, ret_dates: null, max_layover: null,
   };
   const errors = [];
   let destSet = false;
@@ -238,6 +247,15 @@ export function parseAlert(text, today) {
         a.months.push(`${mm.y}-${pad(mm.m)}`);
         j++;
       }
+      i = j; continue;
+    }
+    if (tok === 'escale' || tok === 'escales') {
+      let j = i + 1;
+      if (['max', 'maximum', 'de', 'moins', 'courte', 'courtes'].includes(tokens[j])) j++;
+      if (tokens[j] === 'de') j++;
+      const h = parseHours(tokens[j]);
+      if (h !== null && h > 0) { a.max_layover = h; i = j + 1; continue; }
+      errors.push('Durée d\'escale illisible (ex. escale max 2h)');
       i = j; continue;
     }
     if (tok === 'max' || tok === 'budget') {
@@ -331,6 +349,11 @@ function fmtDate(isoDate) {
   return `${d} ${MONTH_LABELS[m]} ${y}`;
 }
 
+export function fmtHours(h) {
+  const m = Math.round(h * 60);
+  return m % 60 ? `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}` : `${m / 60}h`;
+}
+
 export function describeAlert(a) {
   const parts = [];
   parts.push(`${a.origins.join(',')} → ${a.destinations.length ? a.destinations.join(',') : 'partout'}`);
@@ -352,6 +375,7 @@ export function describeAlert(a) {
   if (a.ret_dates) parts.push(`retour le ${fmtDates(a.ret_dates)}`);
   if (a.max_price) parts.push(`max ${a.max_price} €`);
   if (a.direct) parts.push('direct');
+  if (a.max_layover) parts.push(`escale ≤ ${fmtHours(a.max_layover)}`);
   if (a.dep_window) parts.push(`départ${fmtWin(a.dep_window)}`);
   if (a.ret_window) parts.push(`retour${fmtWin(a.ret_window)}`);
   if (a.priority) parts.push('⚡ prio');

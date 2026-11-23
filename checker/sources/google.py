@@ -31,6 +31,27 @@ _orig_headers = S._shopping_rpc_headers
 CHEAPEST = ShoppingOptions(ranking_mode="cheapest", result_sort="price")
 
 
+def _minutes(dt) -> int | None:
+    """Minutes écoulées depuis l'an 0 pour un horaire Google (date [a, m, j], heure [h] ou [h, m])."""
+    from datetime import datetime
+    if not dt.date or not dt.time:
+        return None
+    y, mo, d = dt.date
+    t = dt.time
+    return int(datetime(y, mo, d, t[0], t[1] if len(t) > 1 else 0).timestamp() // 60)
+
+
+def longest_layover(segments) -> int:
+    """Plus longue correspondance (en minutes) entre deux vols d'un même trajet."""
+    worst = 0
+    for a, b in zip(segments, segments[1:]):
+        arr, dep = _minutes(a.arrival), _minutes(b.departure)
+        if arr is None or dep is None:
+            return 10 ** 6   # horaire inconnu : on ne peut pas garantir une escale courte
+        worst = max(worst, dep - arr)
+    return worst
+
+
 def _hhmm(t) -> str | None:
     """Google donne l'heure sous forme [h] ou [h, m] (les minutes à zéro sont omises)."""
     if not t:
@@ -120,7 +141,7 @@ class GoogleFlights:
         return ok
 
     def search_leg(self, origin: str, destination: str, day: str, market: Market, direct: bool,
-                   window: list | None, fx: FX, fee_pct: float) -> Leg | None:
+                   window: list | None, fx: FX, fee_pct: float, max_layover: float | None = None) -> Leg | None:
         """Aller simple le moins cher à cette date, dans le créneau, vendu dans le pays `market`.
 
         Renvoie None s'il n'y a aucun vol compatible (ou pas de réponse).
@@ -147,6 +168,8 @@ class GoogleFlights:
             dep = _hhmm(f.flights[0].departure.time)
             stops = len(f.flights) - 1
             if not in_window(dep, window) or (direct and stops):
+                continue
+            if max_layover is not None and stops and longest_layover(f.flights) > max_layover * 60:
                 continue
             if best is None or f.price < best[0].price:
                 best = (f, dep, stops)

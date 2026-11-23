@@ -98,6 +98,14 @@ def known_legs(store: dict, keys: list[str], min_gain: float) -> list[Leg]:
 
 # ── Repérage Aviasales ──────────────────────────────────────────────────
 
+def domestic(alert: dict, dest: str, ctx: Ctx) -> bool:
+    """Destination dans le même pays que le départ (exclue des alertes « partout »). Les escales en France restent permises."""
+    countries = {ctx.airports.get(o, {}).get("country") for o in alert["origins"]} - {None, ""}
+    if not countries:
+        countries = {"fr"}
+    return ctx.airports.get(dest, {}).get("country") in countries
+
+
 def tp_discovery(alert: dict, res: dict, ctx: Ctx, outs: list[str], rets: list[str]) -> dict:
     tp = res.get("tp") or {}
     if not ctx.tp.enabled or age(tp.get("at"), ctx.now) < TP_EVERY:
@@ -209,7 +217,7 @@ def query_leg(o: str, dst: str, day: str, alert: dict, store: dict, ctx: Ctx) ->
         store[leg_key(o, dst, day)] = {"at": iso_now(), "fr": None, "mk": {}}
         return
     leg = ctx.google.search_leg(o, dst, day, MARKETS["fr"], alert.get("direct", False), window or None,
-                                ctx.fx, ctx.fee)
+                                ctx.fx, ctx.fee, alert.get("max_layover"))
     key = leg_key(o, dst, day)
     entry = store.setdefault(key, {})
     entry.update({"at": iso_now(), "fr": leg.to_dict() if leg else None})
@@ -246,7 +254,8 @@ def compare_markets(trips: list[Trip], alert: dict, store: dict, res: dict, ctx:
                     return used
                 used += 1
                 q = ctx.google.search_leg(leg.origin, leg.destination, leg.date, MARKETS[code],
-                                          alert.get("direct", False), window or None, ctx.fx, ctx.fee)
+                                          alert.get("direct", False), window or None, ctx.fx, ctx.fee,
+                                          alert.get("max_layover"))
                 if q is None:
                     mk[code] = {"none": True, "at": iso_now()}
                     continue
@@ -258,9 +267,11 @@ def compare_markets(trips: list[Trip], alert: dict, store: dict, res: dict, ctx:
     return used
 
 
-def tp_trips(alert: dict, tp: dict, google_dests: set[str]) -> list[Trip]:
-    outs = [Leg.from_dict(x) for x in tp.get("out", []) if x["destination"] not in google_dests]
-    rets = [Leg.from_dict(x) for x in tp.get("ret", []) if x["origin"] not in google_dests]
+def tp_trips(alert: dict, tp: dict, google_dests: set[str], today) -> list[Trip]:
+    outs = [x for x in (Leg.from_dict(y) for y in tp.get("out", []))
+            if x.destination not in google_dests and out_ok(alert, x, today)]
+    rets = [x for x in (Leg.from_dict(y) for y in tp.get("ret", []))
+            if x.origin not in google_dests and ret_ok(alert, x)]
     return best_trips(alert, outs, rets)
 
 
@@ -295,6 +306,7 @@ def process_alert(alert: dict, res: dict, ctx: Ctx, budget: int) -> dict | None:
     else:
         score = tp.get("score", {})
         pool = set(score) | {x for x in POPULAR if x not in alert["origins"]}
+        pool = {x for x in pool if not domestic(alert, x, ctx)}
         dests = sorted(pool, key=lambda x: (score.get(x, 1e6), x))[:MAX_DESTS]
 
     def current_trips() -> list[Trip]:
@@ -331,7 +343,8 @@ def process_alert(alert: dict, res: dict, ctx: Ctx, budget: int) -> dict | None:
     single = len(dests) == 1
     shown = trips if single else best_per_destination(trips)
     google_dests = {t.out.destination for t in trips}
-    estimates = best_per_destination(tp_trips(alert, tp, google_dests)) if tp else []
+    estimates = [t for t in best_per_destination(tp_trips(alert, tp, google_dests, ctx.today))
+                 if alert["destinations"] or not domestic(alert, t.out.destination, ctx)] if tp else []
     res["top"] = [t.to_dict() for t in shown[:8]] + [t.to_dict() for t in estimates[:4]]
     res["coverage"] = {"legs_known": len(store),
                        "legs_total": len(dests) * len(alert["origins"]) * (len(outs) + len(rets)),

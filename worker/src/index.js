@@ -3,7 +3,7 @@
 //   owner, alerts, seq, settings  → écrits par le bot
 //   results, stats, run           → écrits par le moteur
 
-import { parseAlert, parseSettings, describeAlert, DEFAULT_SETTINGS } from './parse.js';
+import { parseAlert, parseSettings, describeAlert, parseHours, fmtHours, DEFAULT_SETTINGS } from './parse.js';
 
 const json = (o, status = 200) => new Response(JSON.stringify(o), {
   status, headers: { 'content-type': 'application/json; charset=utf-8' },
@@ -71,7 +71,8 @@ const HELP = `<b>✈️ Flight Radar</b>
 <code>/alerte de lyon vers partout en decembre,janvier depart jeu apres 18, ven apres 12 retour sam, dim, lun avant 6 max 100</code>
 <code>/alerte de lyon vers partout aller 30/12 ou 31/12 retour 02/01 ou 03/01</code>
 
-Mots compris : <i>de, vers (ou partout), du … au …, en mars, weekends mars,avril, nuits 2-4, max 80, direct, aller-simple, prio</i>
+Mots compris : <i>de, vers (ou partout), du … au …, en mars, weekends mars,avril, nuits 2-4, max 80, direct, escale max 2h, aller-simple, prio</i>
+« partout » exclut les destinations en France (les escales en France restent possibles).
 Horaires : <i>depart 6-12</i>, ou par jour : <i>depart jeu apres 18, ven 12-20</i> · <i>retour dim, lun avant 6</i>
 Dates précises : <i>aller 30/12 ou 31/12 retour 02/01</i>
 Villes connues : lyon, geneve, paris, londres, milan… Sinon code aéroport à 3 lettres.
@@ -81,7 +82,8 @@ Villes connues : lyon, geneve, paris, londres, milan… Sinon code aéroport à 
 /voir a3 — détail, top 5 et historique
 /pause a3 · /reprise a3 — arrêter / relancer les recherches
 /notif a3 off · /notif a3 on — couper / remettre les notifs
-/prio a3 — vérifier à chaque passage (sinon toutes les 3 h)
+/prio a3 — vérifier à chaque passage (sinon un passage sur trois)
+/escale a3 2h — escales de 2 h maximum (/escale a3 off pour enlever)
 /suppr a3 — supprimer
 /go — lancer une recherche tout de suite
 
@@ -205,6 +207,22 @@ async function handleCommand(env, chatId, text) {
         msg += `\n<b>Historique (meilleur prix du jour)</b>\n${h.map((x) => `${x[0].slice(5)} : ${fmtEur(x[1])}`).join('\n')}\nMin ${fmtEur(Math.min(...prices))} · Max ${fmtEur(Math.max(...prices))}`;
       }
       return send(env, chatId, msg);
+    }
+
+    case '/escale': {
+      const a = findAlert();
+      if (!a) return send(env, chatId, 'Exemple : /escale a2 2h (escales de 2 h maximum) · /escale a2 off');
+      const v = (rest[1] || '').toLowerCase();
+      if (['off', 'non', 'aucune'].includes(v)) a.max_layover = null;
+      else {
+        const h = parseHours(v);
+        if (!h) return send(env, chatId, 'Durée illisible. Exemple : /escale a2 2h ou /escale a2 1h30');
+        a.max_layover = h;
+      }
+      await putJSON(env, 'alerts', alerts);
+      return send(env, chatId, a.max_layover
+        ? `✅ ${a.id} : escales de ${fmtHours(a.max_layover)} maximum (les vols directs restent inclus). Appliqué aux prochaines recherches Google.`
+        : `✅ ${a.id} : plus de limite sur la durée des escales.`);
     }
 
     case '/pause':
