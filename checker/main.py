@@ -18,7 +18,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 from .api import Relay
-from .destinations import POPULAR
+from .destinations import DOMESTIC_KEEP, POPULAR
 from .fx import FX
 from .markets import MARKETS, rank_markets, record
 from .notify import build_digest, is_quiet, select_deals
@@ -99,7 +99,10 @@ def known_legs(store: dict, keys: list[str], min_gain: float) -> list[Leg]:
 # ── Repérage Aviasales ──────────────────────────────────────────────────
 
 def domestic(alert: dict, dest: str, ctx: Ctx) -> bool:
-    """Destination dans le même pays que le départ (exclue des alertes « partout »). Les escales en France restent permises."""
+    """Destination dans le même pays que le départ (exclue des alertes « partout »), sauf la Corse.
+    Les escales en France restent permises."""
+    if dest in DOMESTIC_KEEP:
+        return False
     countries = {ctx.airports.get(o, {}).get("country") for o in alert["origins"]} - {None, ""}
     if not countries:
         countries = {"fr"}

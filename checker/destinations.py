@@ -2,7 +2,8 @@
 
 Liste de grands aéroports européens et méditerranéens desservis depuis Lyon, Genève ou Paris
 (compagnies classiques et low-cost). Les destinations du même pays que le départ sont exclues
-d'office (pas de vols intérieurs en destination finale ; une escale en France reste possible). Elle sert de filet : le moteur classe d'abord les destinations
+d'office (pas de vols intérieurs en destination finale ; une escale en France reste possible),
+sauf la Corse (DOMESTIC_KEEP). Elle sert de filet : le moteur classe d'abord les destinations
 dont Aviasales connaît un prix bas, puis passe sur les autres au fil des passages.
 """
 
@@ -17,4 +18,9 @@ POPULAR = [
     "ATH", "SKG", "HER", "DBV", "SPU", "IST", "SAW",
     # Maghreb
     "RAK", "AGA", "TUN", "DJE", "ALG", "ORN", "CMN",
+    # Corse
+    "AJA", "BIA", "FSC", "CLY",
 ]
+
+# Destinations françaises gardées malgré l'exclusion des vols intérieurs : la Corse.
+DOMESTIC_KEEP = {"AJA", "BIA", "FSC", "CLY"}

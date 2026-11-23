@@ -72,7 +72,7 @@ const HELP = `<b>✈️ Flight Radar</b>
 <code>/alerte de lyon vers partout aller 30/12 ou 31/12 retour 02/01 ou 03/01</code>
 
 Mots compris : <i>de, vers (ou partout), du … au …, en mars, weekends mars,avril, nuits 2-4, max 80, direct, escale max 2h, aller-simple, prio</i>
-« partout » exclut les destinations en France (les escales en France restent possibles).
+« partout » exclut les destinations en France sauf la Corse (les escales en France restent possibles).
 Horaires : <i>depart 6-12</i>, ou par jour : <i>depart jeu apres 18, ven 12-20</i> · <i>retour dim, lun avant 6</i>
 Dates précises : <i>aller 30/12 ou 31/12 retour 02/01</i>
 Villes connues : lyon, geneve, paris, londres, milan… Sinon code aéroport à 3 lettres.
